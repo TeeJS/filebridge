@@ -328,16 +328,29 @@ async function downloadTo(deps, driveId, dest, exportMime) {
   const url = exportMime
     ? `${API}/files/${encodeURIComponent(driveId)}/export?mimeType=${encodeURIComponent(exportMime)}`
     : `${API}/files/${encodeURIComponent(driveId)}?alt=media&supportsAllDrives=true`;
-  const res = await f(url, { headers: { Authorization: 'Bearer ' + token } });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    // files.export refuses anything over 10 MB — give the real reason, not a raw 403.
-    if (exportMime && /exportSizeLimitExceeded/i.test(body)) {
-      throw new Error('too large to export — Google caps document export at 10 MB');
+  // Make the download ABORTABLE: a big file streams for a long time, and without this Stop
+  // couldn't take effect until the whole file finished (checked only between files). Poll the
+  // stop flag and abort the fetch/stream so Stop lands within ~200ms, mid-file.
+  const ac = new AbortController();
+  const poll = setInterval(() => { if (deps.shouldStop && deps.shouldStop()) ac.abort(); }, 200);
+  if (deps.shouldStop && deps.shouldStop()) ac.abort();
+  try {
+    const res = await f(url, { headers: { Authorization: 'Bearer ' + token }, signal: ac.signal });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      // files.export refuses anything over 10 MB — give the real reason, not a raw 403.
+      if (exportMime && /exportSizeLimitExceeded/i.test(body)) {
+        throw new Error('too large to export — Google caps document export at 10 MB');
+      }
+      throw new Error((exportMime ? 'export' : 'download') + ' failed HTTP ' + res.status + ': ' + body.slice(0, 200));
     }
-    throw new Error((exportMime ? 'export' : 'download') + ' failed HTTP ' + res.status + ': ' + body.slice(0, 200));
+    await pipeline(res.body, fs.createWriteStream(dest), { signal: ac.signal });
+  } catch (e) {
+    if (ac.signal.aborted || e.name === 'AbortError') throw new Error('stopped'); // executeDrive maps this to a clean stop
+    throw e;
+  } finally {
+    clearInterval(poll);
   }
-  await pipeline(res.body, fs.createWriteStream(dest));
 }
 
 async function executeDrive(job, actions, deps) {

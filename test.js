@@ -920,6 +920,25 @@ async function run(j) {
     assert.equal(drive.sanitizeName('Ren: der*?.zip'), 'Ren_ der__.zip');
     assert.equal(drive.sanitizeName('dots...'), 'dots');
     assert.equal(manifest.oauth.scopes[0], 'https://www.googleapis.com/auth/drive.readonly', 'manifest asks for read-only Drive access');
+    // Stop aborts an IN-FLIGHT download (not just between files): a never-ending stream is
+    // cut when the stop flag flips, and the run ends stopped with no error.
+    reset(); fs.mkdirSync(DST, { recursive: true });
+    let stopFlag = false;
+    const hangFetch = async (url, opts) => {
+      const r = new Readable({ read() {} }); // never emits 'end'
+      if (opts && opts.signal) {
+        const onAbort = () => r.destroy(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        if (opts.signal.aborted) onAbort(); else opts.signal.addEventListener('abort', onAbort);
+      }
+      return { ok: true, status: 200, body: r, text: async () => '' };
+    };
+    setTimeout(() => { stopFlag = true; }, 60);
+    const stoppedRes = await drive.executeDrive(djob({}),
+      [{ op: 'copy', rel: 'big.bin', size: 1, mtimeMs: T1ms, driveId: 'x' }],
+      { getToken: async () => 't', fetchImpl: hangFetch, shouldStop: () => stopFlag });
+    assert.equal(stoppedRes.stopped, true, 'in-flight download is aborted on stop');
+    assert.equal(stoppedRes.errors.length, 0, 'a stop is not an error');
+    assert(!fs.existsSync(path.join(DST, 'big.bin')), 'no partial file left behind on stop');
   }
 
   // ── web jobs: rule validation, URL matching, ledger decisions (web.js, pure part) ──
