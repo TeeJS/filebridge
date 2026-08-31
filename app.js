@@ -591,6 +591,9 @@ function openEdit(j) {
   syncMirrorUi();
   $('#fInclude').value = j && j.include ? j.include.join('; ') : '';
   $('#fExclude').value = j && j.exclude ? j.exclude.join('; ') : '';
+  editIncludeGroups = j && Array.isArray(j.includeGroups) ? j.includeGroups.slice() : [];
+  editExcludeGroups = j && Array.isArray(j.excludeGroups) ? j.excludeGroups.slice() : [];
+  renderGroupChips();
   const sc = (j && j.schedule) || { type: 'manual' };
   $('#fCron').value = toCron(sc);
   // 'every' prefill — a legacy pre-v1.1 interval maps to it losslessly (every N min).
@@ -642,7 +645,7 @@ $('#fSave').addEventListener('click', async () => {
       schedule: sc, runIfMissed: $('#fMissed').checked,
     };
     // folder-only fields have no meaning on a web job (e.g. after switching the type)
-    for (const k of ['source', 'mirror', 'include', 'exclude', 'compare', 'subfolders', 'subfolderFromSource', 'driveApi', 'exportNative', 'deleteBeforeCopy', 'followShortcuts', 'mirrorMeta', 'recycle', 'testSource', 'changedOnly']) delete job[k];
+    for (const k of ['source', 'mirror', 'include', 'exclude', 'includeGroups', 'excludeGroups', 'compare', 'subfolders', 'subfolderFromSource', 'driveApi', 'exportNative', 'deleteBeforeCopy', 'followShortcuts', 'mirrorMeta', 'recycle', 'testSource', 'changedOnly']) delete job[k];
   } else {
     job = {
       ...(old || {}), id: editId || undefined,
@@ -660,6 +663,7 @@ $('#fSave').addEventListener('click', async () => {
       mirrorMeta: $('#fMirrorMeta').checked,
       recycle: $('#fRecycle').checked, testSource: $('#fTestSrc').checked,
       include: splitGlobs($('#fInclude').value), exclude: splitGlobs($('#fExclude').value),
+      includeGroups: editIncludeGroups.slice(), excludeGroups: editExcludeGroups.slice(),
       schedule: sc, runIfMissed: $('#fMissed').checked,
     };
     delete job.changedOnly; // superseded by `compare`
@@ -707,27 +711,49 @@ let filterGroups = [];
 async function loadGroups() {
   const r = await api('filters').catch(() => null);
   if (r && r.ok) filterGroups = r.groups || [];
+  if (activeView === 'Edit') renderGroupChips(); // groups may have arrived/changed after the edit view opened
 }
-// Insert a group's wildcards into a target field, de-duplicating against what's there.
-function insertGroup(targetId, wildcards) {
-  const input = $('#' + targetId);
-  const have = new Set(splitGlobs(input.value).map(w => w.toLowerCase()));
-  const add = wildcards.filter(w => !have.has(w.toLowerCase()));
-  const merged = splitGlobs(input.value).concat(add);
-  input.value = merged.join('; ');
+// + Group attaches a group as a LIVE reference (chip) to the job's Copy-only or Skip list —
+// editing the group later updates every job that links it. The text fields stay for one-off
+// patterns. editIncludeGroups/editExcludeGroups hold the ids for the job being edited.
+let editIncludeGroups = [], editExcludeGroups = [];
+function grpById(id) { return filterGroups.find(g => g.id === id) || { id, name: '(missing group)', missing: true }; }
+function chipHtml(g, removable) {
+  return '<span class="gchip' + (g.missing ? ' missing' : removable ? '' : ' auto') + '">' + esc(g.name) +
+    (removable ? '<button class="gchip-x" data-gid="' + esc(g.id) + '" aria-label="Remove ' + esc(g.name) + '">×</button>' : ' · global') + '</span>';
 }
+function renderGroupChips() {
+  const inc = editIncludeGroups.map(grpById);
+  const exc = editExcludeGroups.map(grpById);
+  // Global groups apply to every job as a skip — show them as read-only "auto" chips so the
+  // user sees they're active (unless already linked explicitly, to avoid a duplicate chip).
+  const globals = filterGroups.filter(g => g.global && !editExcludeGroups.includes(g.id));
+  const ie = $('#fIncludeGroups'), ee = $('#fExcludeGroups');
+  ie.innerHTML = inc.map(g => chipHtml(g, true)).join('');
+  ee.innerHTML = exc.map(g => chipHtml(g, true)).join('') + globals.map(g => chipHtml(g, false)).join('');
+  ie.hidden = !inc.length;
+  ee.hidden = !exc.length && !globals.length;
+}
+function attachGroup(targetId, gid) {
+  const list = targetId === 'fInclude' ? editIncludeGroups : editExcludeGroups;
+  if (!list.includes(gid)) list.push(gid);
+  renderGroupChips();
+}
+$('#fIncludeGroups').addEventListener('click', e => { const x = e.target.closest('.gchip-x'); if (x) { editIncludeGroups = editIncludeGroups.filter(id => id !== x.dataset.gid); renderGroupChips(); } });
+$('#fExcludeGroups').addEventListener('click', e => { const x = e.target.closest('.gchip-x'); if (x) { editExcludeGroups = editExcludeGroups.filter(id => id !== x.dataset.gid); renderGroupChips(); } });
 document.querySelectorAll('.insertGroup').forEach(btn => btn.addEventListener('click', e => {
   e.stopPropagation();
-  const target = btn.dataset.target;
   const menu = $('#groupMenu');
-  menu.innerHTML = filterGroups.map(g => '<button data-gid="' + esc(g.id) + '"><span class="gm-n">' + esc(g.name) +
+  // Global groups are skip-only — don't offer them for the Copy-only (include) slot.
+  const choices = btn.dataset.target === 'fInclude' ? filterGroups.filter(g => !g.global) : filterGroups;
+  menu.innerHTML = choices.map(g => '<button data-gid="' + esc(g.id) + '"><span class="gm-n">' + esc(g.name) + (g.global ? ' · global' : '') +
       '</span><span class="gm-w">' + esc(g.wildcards.join('; ')) + '</span></button>').join('') +
     '<div class="sep"></div><button data-manage="1"><span class="gm-n">New or edit groups…</span></button>';
   menu.classList.add('show');
   const r = btn.getBoundingClientRect();
   menu.style.top = Math.min(window.innerHeight - menu.offsetHeight - 8, r.bottom + 4) + 'px';
   menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.left)) + 'px';
-  menu._target = target;
+  menu._target = btn.dataset.target;
 }));
 document.addEventListener('click', e => {
   const menu = $('#groupMenu');
@@ -735,8 +761,7 @@ document.addEventListener('click', e => {
   const item = e.target.closest('#groupMenu button');
   if (item) {
     if (item.dataset.manage) { menu.classList.remove('show'); openFilters(); return; }
-    const g = filterGroups.find(x => x.id === item.dataset.gid);
-    if (g) insertGroup(menu._target, g.wildcards);
+    if (item.dataset.gid) attachGroup(menu._target, item.dataset.gid);
   }
   if (!e.target.closest('.insertGroup')) menu.classList.remove('show');
 });
@@ -757,7 +782,7 @@ async function openFilters() {
 function renderFilterList() {
   $('#filtList').innerHTML = filterGroups.map(g =>
     '<div class="filtrow' + (g.id === fgSelId ? ' sel' : '') + '" data-gid="' + esc(g.id) + '">' +
-      '<span class="fn">' + esc(g.name) + '</span>' +
+      '<span class="fn">' + esc(g.name) + (g.global ? ' <span style="color:var(--amber);font-size:12px">· global</span>' : '') + '</span>' +
       '<span class="fw">' + esc(g.wildcards.join('; ')) + '</span></div>').join('') ||
     '<div class="gm-empty" style="padding:20px">No groups yet.</div>';
 }
@@ -772,6 +797,7 @@ function openFilterEdit(id) {
   $('#filtEdit').hidden = false;
   $('#fgName').value = g ? g.name : '';
   $('#fgWild').value = g ? g.wildcards.join('\n') : '';
+  $('#fgGlobal').checked = !!(g && g.global);
   $('#fgErr').textContent = '';
   $('#fgDelete').hidden = !g;
   $('#fgDelete').textContent = 'Delete group';
@@ -780,7 +806,7 @@ function openFilterEdit(id) {
 $('#fgNew').addEventListener('click', () => { fgSelId = null; openFilterEdit(null); $('#fgName').focus(); });
 $('#fgSave').addEventListener('click', async () => {
   const wildcards = $('#fgWild').value.split(/[;\n]/).map(s => s.trim()).filter(Boolean);
-  const r = await api('saveFilter', { group: { id: fgSelId || undefined, name: $('#fgName').value, wildcards } });
+  const r = await api('saveFilter', { group: { id: fgSelId || undefined, name: $('#fgName').value, wildcards, global: $('#fgGlobal').checked } });
   if (!r.ok) { $('#fgErr').textContent = r.error; return; }
   await loadGroups();
   fgSelId = r.id;
@@ -796,8 +822,11 @@ $('#fgDelete').addEventListener('click', async e => {
   renderFilterList();
   $('#filtEdit').hidden = true;
 });
-$('#filtBack').addEventListener('click', () => showView(filtersReturnView));
-$('#filtDone').addEventListener('click', () => showView(filtersReturnView));
+// Returning to the editor: re-sync the chips so a group renamed/deleted/globaled in the
+// manager reflects immediately (loadGroups already refreshed filterGroups during the edit).
+const backFromFilters = () => { showView(filtersReturnView); if (filtersReturnView === 'Edit') renderGroupChips(); };
+$('#filtBack').addEventListener('click', backFromFilters);
+$('#filtDone').addEventListener('click', backFromFilters);
 
 // ── result view ───────────────────────────────────────────────────────────────
 let resultId = null;

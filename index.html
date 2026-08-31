@@ -198,6 +198,14 @@
   #cronNext.bad { color: var(--red); font-weight: 600; }
   .fhelp { flex: none; color: var(--muted); font-size: 14px; margin: 0 0 0 108px; }
   .fhelp.warn { color: var(--amber); font-weight: 600; }
+  /* Linked filter-group chips under the Copy-only / Skip fields */
+  .gchips { padding-left: 108px; gap: 6px; flex-wrap: wrap; }
+  .gchip { display: inline-flex; align-items: center; gap: 2px; font-size: 13px; padding: 3px 6px 3px 11px;
+           border-radius: 999px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--text); white-space: nowrap; }
+  .gchip.auto { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--muted); padding-right: 11px; }
+  .gchip.missing { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--muted); text-decoration: line-through; padding-right: 11px; }
+  .gchip-x { min-height: 20px; min-width: 22px; padding: 0; font-size: 16px; line-height: 1; background: none; border: none; color: var(--muted); cursor: pointer; }
+  .gchip-x:hover { color: var(--text); }
   #srcResolved, #dstResolved { font-family: var(--mono); font-size: 13px; margin-top: -6px; }
   .fwarn { flex: none; color: var(--red); font-size: 14px; font-weight: 600; margin: 0 0 0 108px; }
   .ferr { flex: none; color: var(--red); font-size: 16px; font-weight: 600; min-height: 1.3em; margin: 0; }
@@ -508,12 +516,14 @@
       <input type="text" id="fInclude" placeholder="*.docx; *.xls*  (blank = all files)" style="flex:1">
       <button type="button" class="insertGroup" data-target="fInclude">+ Group</button>
     </div>
+    <div class="frow folderOnly gchips" id="fIncludeGroups" hidden></div>
     <div class="frow folderOnly">
       <label class="fl" for="fExclude">Skip</label>
       <input type="text" id="fExclude" placeholder="*.tmp; node_modules" style="flex:1">
       <button type="button" class="insertGroup" data-target="fExclude">+ Group</button>
     </div>
-    <p class="fhelp folderOnly">Add reusable wildcard sets with <b>+ Group</b>, or <a href="#" class="link" id="manageFilters">manage filter groups…</a></p>
+    <div class="frow folderOnly gchips" id="fExcludeGroups" hidden></div>
+    <p class="fhelp folderOnly">The text fields take one-off patterns. <b>+ Group</b> attaches a reusable set as a <b>live link</b> — edit the group later and every job that links it updates. Groups marked <b>global</b> skip everywhere automatically. <a href="#" class="link" id="manageFilters">manage filter groups…</a></p>
     <p class="fwarn folderOnly" id="mirrorWarn" hidden>Mirror deletes files and folders from the destination when they no longer exist in the source. Use Preview first.</p>
     <div class="frow folderOnly" id="mirrorOpts" hidden>
       <label class="fl">On delete</label>
@@ -623,6 +633,7 @@
           <input type="text" id="fgName" placeholder="Common image files" style="flex:1"></div>
         <label class="fl" for="fgWild" style="width:auto;text-align:left">Wildcards (one per line or separated by ;)</label>
         <textarea id="fgWild" spellcheck="false" placeholder="*.jpg&#10;*.png&#10;*.gif"></textarea>
+        <label class="chk" style="margin-top:8px"><input type="checkbox" id="fgGlobal"> Apply as global exclusion — skip these in <b>every</b> folder &amp; Drive job</label>
         <p class="ferr" id="fgErr"></p>
         <div class="frow"><button class="danger" id="fgDelete">Delete group</button><span class="grow"></span>
           <button id="fgSave" class="primary">Save group</button></div>

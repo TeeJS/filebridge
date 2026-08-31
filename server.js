@@ -112,6 +112,29 @@ function saveFilters(f) {
   fs.writeFileSync(tmp, JSON.stringify(f, null, 2));
   fs.renameSync(tmp, FILTERS_PATH);
 }
+// Merge a job's LITERAL patterns with its referenced groups (live) and every "global
+// exclusion" group into the effective include/exclude the engine sees. Resolved fresh every
+// run — never persisted — so editing a group (or its global flag) updates all jobs at once.
+// Folder + Drive jobs only; web jobs don't use file/folder globs.
+function resolveFilters(job) {
+  const groups = (loadFilters().groups || []).filter(g => g && typeof g === 'object' && g.id); // tolerate a malformed filters.json
+  const byId = new Map(groups.map(g => [g.id, g]));
+  // A job's own include/exclude may be a STRING (jobs.json is hand-editable and compileGlobs
+  // splits strings on ';') — normalize before spreading, or a string would explode into
+  // per-character globs (incl. '*' = match everything). Same tolerance compileGlobs applies.
+  const asList = v => Array.isArray(v) ? v : String(v || '').split(';');
+  const dedup = arr => [...new Set(arr.map(s => String(s).trim()).filter(Boolean))];
+  // A global group is skip-only — never let it feed an INCLUDE list, or its patterns land in
+  // both include and exclude (exclude wins) and the job would copy nothing.
+  const fromIds = (ids, allowGlobal) => (Array.isArray(ids) ? ids : []).flatMap(id => {
+    const g = byId.get(id);
+    return g && (allowGlobal || !g.global) ? (g.wildcards || []) : [];
+  });
+  const globalWc = groups.filter(g => g.global).flatMap(g => g.wildcards || []);
+  job.include = dedup([...asList(job.include), ...fromIds(job.includeGroups, false)]);
+  job.exclude = dedup([...asList(job.exclude), ...fromIds(job.excludeGroups, true), ...globalWc]);
+  return job;
+}
 const MISSED_GRACE_MS = 15 * 60000; // without "run if missed", a run this late still counts as on-time
 
 // ── config file ───────────────────────────────────────────────────────────────
@@ -251,6 +274,10 @@ async function pump() {
       return;
     }
   }
+  // Fold referenced + global filter groups into job.include/exclude (folder + Drive only).
+  // Guarded: a filter-resolution failure becomes a clean per-job failure, never an escaped
+  // rejection that would jam the queue and retry every tick.
+  if (stored.kind !== 'web') { try { resolveFilters(job); } catch (e) { failRun('filter groups could not be resolved: ' + e.message); return; } }
   current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, disk: null, startedAt: Date.now() };
   const t0 = Date.now();
   diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); // async — non-blocking
@@ -767,7 +794,7 @@ exports.handle = async function handle(action, ctx) {
     const f = loadFilters();
     const idx = g.id ? f.groups.findIndex(x => x.id === g.id) : -1;
     const id = g.id || 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-    const entry = { id, name, wildcards };
+    const entry = { id, name, wildcards, global: !!g.global };
     if (idx >= 0) f.groups[idx] = entry; else f.groups.push(entry);
     saveFilters(f);
     return { ok: true, id };
@@ -843,6 +870,7 @@ function slim() {
   return out;
 }
 
+exports._resolveFilters = resolveFilters; // exposed for tests
 exports._shutdown = function () {
   clearInterval(timer);
   stopFlag = true;

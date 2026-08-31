@@ -646,6 +646,44 @@ async function run(j) {
     assert(fs.existsSync(path.join(ROOT, 'subdest', 'src', 'a.txt')), 'copied into <dest>\\<source-name> subfolder');
     lr = await call('list');
     assert.equal(lr.jobs.find(x => x.id === sv3.id).resolvedDest, path.join(ROOT, 'subdest', 'src'), 'list shows the computed destination');
+
+    // filter groups resolve LIVE: literal patterns + referenced groups + every global group
+    const fdir = path.join(ROOT, 'appdata', 'open-quake', 'file-bridge');
+    fs.mkdirSync(fdir, { recursive: true });
+    fs.writeFileSync(path.join(fdir, 'filters.json'), JSON.stringify({ groups: [
+      { id: 'g1', name: 'logs', wildcards: ['*.log'], global: true },
+      { id: 'g2', name: 'junk', wildcards: ['skipme.txt', 'node_modules'] },
+      { id: 'g3', name: 'onlydocs', wildcards: ['*.docx'] },
+    ] }));
+    let fj = { include: ['*.keep'], exclude: ['own.tmp'], includeGroups: [], excludeGroups: ['g2'] };
+    server._resolveFilters(fj);
+    assert.deepEqual(fj.exclude.slice().sort(), ['*.log', 'node_modules', 'own.tmp', 'skipme.txt'], 'exclude = literal + referenced group + global');
+    assert.deepEqual(fj.include, ['*.keep'], 'a global group is skip-only — it never touches include');
+    fj = { include: [], exclude: [], includeGroups: ['g3'], excludeGroups: [] };
+    server._resolveFilters(fj);
+    assert(fj.include.includes('*.docx'), 'includeGroups resolve into the include list');
+    assert.deepEqual(fj.exclude, ['*.log'], 'the global group still applies even with no explicit excludes');
+    // a missing/deleted referenced group id just resolves to nothing (no crash)
+    fj = { include: [], exclude: ['x'], includeGroups: [], excludeGroups: ['gone'] };
+    server._resolveFilters(fj);
+    assert.deepEqual(fj.exclude.slice().sort(), ['*.log', 'x'], 'a deleted group reference is ignored');
+    // a STRING exclude (hand-edited jobs.json) must be split on ';', not exploded into chars
+    fj = { include: [], exclude: '*.tmp; *.bak', includeGroups: [], excludeGroups: [] };
+    server._resolveFilters(fj);
+    assert(fj.exclude.includes('*.tmp') && fj.exclude.includes('*.bak'), 'string exclude is split into patterns');
+    assert(!fj.exclude.includes('*'), 'string exclude is NOT exploded into a match-all "*"');
+    // a GLOBAL group referenced as an INCLUDE must NOT feed the include list (would collide
+    // with its own global exclude and copy nothing) — it only ever applies as a skip
+    fj = { include: [], exclude: [], includeGroups: ['g1'], excludeGroups: [] };
+    server._resolveFilters(fj);
+    assert(!fj.include.includes('*.log'), 'a global group never contributes to include');
+    assert(fj.exclude.includes('*.log'), 'a global group still applies as a skip');
+    // a malformed filters.json (null entry) must not crash resolution
+    fs.writeFileSync(path.join(fdir, 'filters.json'), JSON.stringify({ groups: [null, { id: 'g1', name: 'x', wildcards: ['*.log'], global: true }] }));
+    fj = { include: [], exclude: [] };
+    assert.doesNotThrow(() => server._resolveFilters(fj), 'a null group entry does not crash');
+    assert(fj.exclude.includes('*.log'), 'valid groups still resolve past a bad entry');
+    fs.rmSync(path.join(fdir, 'filters.json'), { force: true });
   } finally {
     server._shutdown();
   }
