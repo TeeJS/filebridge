@@ -122,7 +122,7 @@ async function listTree(job, deps) {
   const sub = job.subfolders !== false;
   const follow = job.followShortcuts === true;
   const exportNative = job.exportNative === true;
-  const out = { files: [], natives: [], errors: [], foldersScanned: 0, dirRels: new Set(), topCount: 0, filteredDirs: 0, stopped: false };
+  const out = { files: [], natives: [], errors: [], foldersScanned: 0, dirRels: new Set(), topCount: 0, filteredDirs: 0, filteredDirRels: [], stopped: false };
 
   async function walkFolder(folderId, relDir, chain) {
     if (deps.shouldStop && deps.shouldStop()) { out.stopped = true; return; }
@@ -179,7 +179,7 @@ async function listTree(job, deps) {
       const outName = exp ? name + '.' + exp.ext : name;
       const dupKey = outName.toLowerCase();
       const rel = relDir ? relDir + '/' + outName : outName;
-      if (mime === FOLDER && exc.length && sync.matches(exc, outName, rel)) { out.filteredDirs++; continue; }
+      if (mime === FOLDER && exc.length && sync.matches(exc, outName, rel)) { out.filteredDirs++; out.filteredDirRels.push(rel + '/'); continue; }
       // A genuine same-name-different-item collision (two DIFFERENT items that would land on
       // one Windows path) is a SKIP, not an error — Windows can't hold both, so we keep the
       // first, exactly as the local mount does. Reported amber, never counted as a failure.
@@ -220,7 +220,8 @@ async function planDrive(job, deps) {
   const dst = String(job.dest);
   const inc = sync.compileGlobs(job.include), exc = sync.compileGlobs(job.exclude);
   const cmp = sync.resolveCompare(job);
-  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null, nativeSkipped: [] };
+  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null, nativeSkipped: [], unchangedList: [], filteredList: [] };
+  const collectUnchanged = deps.collectUnchanged === true, collectFiltered = deps.collectFiltered === true;
   const stop = () => deps.shouldStop && deps.shouldStop();
   const prog = (rel, op, reason) => { if (deps.onProgress) deps.onProgress({ phase: 'scan', scanned: out.scanned, rel, op, reason }); };
 
@@ -228,6 +229,7 @@ async function planDrive(job, deps) {
   out.errors.push(...tree.errors);
   out.foldersScanned = tree.foldersScanned;
   out.filtered += tree.filteredDirs; // excluded remote folders count as filtered (local-engine parity)
+  if (collectFiltered) for (const r of tree.filteredDirRels) out.filteredList.push(r); // …and appear in the EXCLUDED log, matching sync.js
   out.nativeSkipped = tree.natives;
   const remote = new Set(tree.dirRels); // lowercased rels present remotely (dirs + files)
   // Natives and unfollowed shortcuts ARE remote-present — without them in the set, a
@@ -239,8 +241,8 @@ async function planDrive(job, deps) {
     remote.add(f.rel.toLowerCase());
     out.scanned++;
     prog(f.rel);
-    if (exc.length && sync.matches(exc, f.name, f.rel)) { out.filtered++; prog(f.rel, 'filtered'); continue; }
-    if (inc.length && !sync.matches(inc, f.name, f.rel)) { out.filtered++; prog(f.rel, 'filtered'); continue; }
+    if (exc.length && sync.matches(exc, f.name, f.rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(f.rel); prog(f.rel, 'filtered'); continue; }
+    if (inc.length && !sync.matches(inc, f.name, f.rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(f.rel); prog(f.rel, 'filtered'); continue; }
     let reason = 'all files';
     if (cmp.mode !== 'all') {
       const to = path.join(dst, f.rel);
@@ -276,7 +278,7 @@ async function planDrive(job, deps) {
       }
     }
     if (reason) { out.actions.push({ op: 'copy', rel: f.rel, size: f.size, mtimeMs: f.mtimeMs, driveId: f.id, exportMime: f.exportMime, reason }); out.totalBytes += f.size; prog(f.rel, 'copy', reason); }
-    else { out.unchanged++; prog(f.rel, 'same'); }
+    else { out.unchanged++; if (collectUnchanged) out.unchangedList.push(f.rel); prog(f.rel, 'same'); }
   }
 
   if (job.mirror && tree.errors.length) {
@@ -359,7 +361,7 @@ async function downloadTo(deps, driveId, dest, exportMime, onBytes) {
 
 async function executeDrive(job, actions, deps) {
   const dst = String(job.dest);
-  const res = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: false };
+  const res = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], warnings: [], skipped: [], stopped: false };
   async function ensureDir(dir) {
     const made = await fsp.mkdir(dir, { recursive: true });
     if (made) res.foldersCreated += 1 + (dir.length > made.length ? dir.slice(made.length).split(path.sep).filter(Boolean).length : 0);
@@ -412,7 +414,7 @@ async function executeDrive(job, actions, deps) {
       // file so the byte total isn't silently short.
       if (a.exportMime && !wrote) { try { wrote = (await fsp.stat(to)).size; } catch {} }
       try { await fsp.utimes(to, new Date(), new Date(a.mtimeMs)); }
-      catch (e) { res.errors.push({ path: a.rel, error: 'downloaded, but could not set the timestamp: ' + e.message }); }
+      catch (e) { res.warnings.push({ path: a.rel, warn: 'downloaded, but could not set the timestamp: ' + e.message }); }
       res.copied++; res.bytes += wrote;
     } catch (e) {
       try { await fsp.rm(tmp, { force: true }); } catch {}
@@ -425,6 +427,7 @@ async function executeDrive(job, actions, deps) {
     const d = await sync.execute(job, dels, { trash: deps.trash, shouldStop: deps.shouldStop, onProgress: deps.onProgress ? p => deps.onProgress({ ...p, done: done + p.done, total }) : undefined });
     res.deleted = d.deleted; res.recycled = d.recycled; res.foldersDeleted = d.foldersDeleted;
     res.errors.push(...d.errors);
+    res.warnings.push(...(d.warnings || []));
     if (d.stopped) res.stopped = true;
   }
   return res;

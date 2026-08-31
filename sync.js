@@ -341,8 +341,11 @@ async function plan(job, opts = {}) {
   const inc = compileGlobs(job.include), exc = compileGlobs(job.exclude);
   const sub = job.subfolders !== false;
   const cmp = resolveCompare(job);
-  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null, folderMeta: [] };
+  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null, folderMeta: [], unchangedList: [], filteredList: [] };
   const stop = () => opts.shouldStop && opts.shouldStop();
+  // Per-file lists for logging (up-to-date / exclusions) are collected only when the caller
+  // asks — they'd be a big memory cost on a huge tree, and are logged only if that category is on.
+  const collectUnchanged = opts.collectUnchanged === true, collectFiltered = opts.collectFiltered === true;
   // Mirror source timestamps + read-only attribute onto the destination (opt-in). Creation
   // time can't be set on this stack — Node has no birthtime API and the alternatives (native
   // module / shell) are off-limits — so this is the archival-fidelity SUBSET: modified/access
@@ -384,8 +387,8 @@ async function plan(job, opts = {}) {
     out.scanned++;
     prog(rel); // every file — the UI shows the live Source/Destination path being examined
     if (virtual) viaShortcut.add(rel.toLowerCase());
-    if (exc.length && matches(exc, name, rel)) { out.filtered++; prog(rel, 'filtered'); return; }
-    if (inc.length && !matches(inc, name, rel)) { out.filtered++; prog(rel, 'filtered'); return; }
+    if (exc.length && matches(exc, name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel); prog(rel, 'filtered'); return; }
+    if (inc.length && !matches(inc, name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel); prog(rel, 'filtered'); return; }
     if (!s) {
       try { s = await fsp.stat(abs); }
       catch (e) { out.errors.push({ path: rel, error: e.message }); prog(rel, 'error'); return; }
@@ -402,7 +405,7 @@ async function plan(job, opts = {}) {
       const a = { op: 'copy', rel, size: s.size, mtimeMs: s.mtimeMs, atimeMs: s.atimeMs, readonly: !(s.mode & 0o200), reason };
       if (virtual) a.from = abs; // execute copies from the shortcut target, not src+rel
       out.actions.push(a); out.totalBytes += s.size; prog(rel, 'copy', reason);
-    } else { out.unchanged++; prog(rel, 'same'); }
+    } else { out.unchanged++; if (collectUnchanged) out.unchangedList.push(rel); prog(rel, 'same'); }
   }
 
   async function expandShortcut(abs, relDir, lnkName, chain, siblings) {
@@ -436,7 +439,7 @@ async function plan(job, opts = {}) {
     }
     if (ts.isDirectory()) {
       if (!sub) return; // a folder shortcut is a subfolder — top-level-only jobs skip it
-      if (exc.length && matches(exc, base, rel)) { out.filtered++; return; }
+      if (exc.length && matches(exc, base, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel + '/'); return; }
       if (chain.has(key)) { out.errors.push({ path: lnkRel, error: 'shortcut loop skipped — already visiting ' + target }); return; }
       viaShortcut.add(rel.toLowerCase());
       const next = new Set(chain); next.add(key);
@@ -463,7 +466,7 @@ async function plan(job, opts = {}) {
       const rel = relDir ? relDir + '/' + ent.name : ent.name;
       if (ent.isDirectory()) {
         if (virtual) viaShortcut.add(rel.toLowerCase());
-        if (exc.length && matches(exc, ent.name, rel)) { out.filtered++; continue; }
+        if (exc.length && matches(exc, ent.name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel + '/'); continue; }
         if (sub) await walkSrc(path.join(absDir, ent.name), rel, chain, virtual);
         continue;
       }
@@ -471,7 +474,7 @@ async function plan(job, opts = {}) {
       if (followLnk && /\.lnk$/i.test(ent.name)) {
         // The literal .lnk name stays excludable — "*.lnk" or "Foo.lnk" opts a shortcut
         // out of expansion exactly as it opts the file out of copying with follow off.
-        if (exc.length && matches(exc, ent.name, rel)) { out.filtered++; continue; }
+        if (exc.length && matches(exc, ent.name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel); continue; }
         await expandShortcut(path.join(absDir, ent.name), relDir, ent.name, chain, siblings);
         continue;
       }
@@ -545,7 +548,7 @@ async function isPlaceholderFailure(e, rel, srcPath) {
 
 async function execute(job, actions, opts = {}) {
   const src = String(job.source), dst = String(job.dest);
-  const res = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: false };
+  const res = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], warnings: [], skipped: [], stopped: false };
   const mirrorMeta = job.mirrorMeta === true; // match source atime + read-only bit (opt-in)
   // mkdir(recursive) returns the FIRST directory it created (undefined if all existed), so
   // the segments from there down to the target are exactly the folders created just now.
@@ -627,10 +630,10 @@ async function execute(job, actions, opts = {}) {
         // it — NAS shares sometimes allow data writes but deny attribute writes); the only
         // cost is that changed-only passes recopy it until the timestamp sticks.
         try { await fsp.utimes(to, mirrorMeta && a.atimeMs != null ? new Date(a.atimeMs) : new Date(), new Date(a.mtimeMs)); }
-        catch (e) { res.errors.push({ path: a.rel, error: 'copied, but could not set the timestamp: ' + e.message }); }
+        catch (e) { res.warnings.push({ path: a.rel, warn: 'copied, but could not set the timestamp: ' + e.message }); } // the file IS copied — a warning, not a failure
         // Mirror the source's read-only attribute onto the copy (opt-in). Set LAST — the next
         // run's unlock() clears it before overwriting, so it never blocks a future copy.
-        if (mirrorMeta && a.readonly) { try { await fsp.chmod(to, 0o444); } catch {} }
+        if (mirrorMeta && a.readonly) { try { await fsp.chmod(to, 0o444); } catch (e) { res.warnings.push({ path: a.rel, warn: 'copied, but could not set the read-only attribute: ' + e.message }); } }
         res.copied++; res.bytes += a.size || 0;
       } else if (a.op === 'del' || a.op === 'deldir') {
         if (await removePath(to, a.rel)) { res.deleted++; if (a.op === 'deldir') res.foldersDeleted++; }
@@ -656,8 +659,8 @@ async function execute(job, actions, opts = {}) {
       // Time FIRST (on a still-writable folder), then the read-only bit — order that can't
       // trip on a folder we just made read-only. The bit is harmless to file ops inside it.
       try { await fsp.utimes(dir, m.atimeMs != null ? new Date(m.atimeMs) : new Date(), new Date(m.mtimeMs)); }
-      catch (e) { res.errors.push({ path: m.rel, error: 'could not set the folder timestamp: ' + e.message }); }
-      if (m.readonly) { try { await fsp.chmod(dir, 0o555); } catch {} }
+      catch (e) { res.warnings.push({ path: m.rel, warn: 'could not set the folder timestamp: ' + e.message }); }
+      if (m.readonly) { try { await fsp.chmod(dir, 0o555); } catch (e) { res.warnings.push({ path: m.rel, warn: 'could not set the folder read-only attribute: ' + e.message }); } }
     }
   }
   return res;

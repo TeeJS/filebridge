@@ -35,6 +35,7 @@ function msg(t, cls) { const m = $('#msg'); m.textContent = t || ''; m.className
 
 let jobs = [];
 let grand = null;
+let logCatsState = null; // which per-file categories get written to the activity log (from `list`)
 let rules = [], sessions = [];
 let driveInfo = null; // host OAuth status for the Google Drive API ({available, configured, connected})
 let paused = false;   // global scheduler pause (manual runs still work)
@@ -167,6 +168,7 @@ function stHtml(j) {
       : 'Preview: ' + r.planCopies + ' copy, ' + r.planDeletes + ' delete');
     if (r.stopped) return st('c-bad', 'Stopped');
     if (r.errorCount) return st('c-bad', r.errorCount + ' errors');
+    if (r.warningCount) return st('c-warn', 'Done · ' + r.warningCount + ' warnings');
     return st('c-ok', 'Done — ' + r.copied + (r.kind === 'web' ? ' downloaded' : ' copied' + (r.deleted ? ', ' + r.deleted + ' deleted' : '')));
   }
   if (j.enabled === false) return st('c-muted', 'Disabled');
@@ -177,6 +179,7 @@ function lastHtml(j) {
   if (!lr) return '<span class="cell">Never run</span>';
   const what = lr.needsLogin ? '<b style="color:var(--amber)">needs sign-in</b>'
     : lr.errors ? '<b style="color:var(--red)">' + lr.errors + ' errors</b>'
+    : lr.warnings ? '<b style="color:var(--amber)">' + lr.warnings + ' warnings</b>'
     : '<b>' + lr.copied + (j.kind === 'web' ? ' downloaded</b>' : ' copied</b>' + (lr.deleted ? ', ' + lr.deleted + ' del' : ''));
   return '<span class="cell">' + what + ' · ' + esc(fmtAgo(lr.at)) + '</span>';
 }
@@ -239,6 +242,7 @@ async function refreshList() {
   if (!r || !r.ok) { msg('Cannot reach the sync service', 'bad'); return; }
   jobs = r.jobs || [];
   grand = r.grand || null;
+  if (r.logCats) { logCatsState = r.logCats; renderLogCats(); }
   rules = r.rules || []; sessions = r.sessions || [];
   driveInfo = r.drive || null;
   paused = !!r.paused; renderPause();
@@ -912,6 +916,7 @@ async function openResult(id) {
     if (d.filtered) parts.push('<span><b>' + d.filtered + '</b> filtered out</span>');
     if (d.mirrorProtected) parts.push('<span><b>' + d.mirrorProtected + '</b> skip-protected from deletion</span>');
     if (d.skippedCount) parts.push('<span><b style="color:var(--amber)">' + d.skippedCount + '</b> skipped</span>');
+    if (d.warningCount) parts.push('<span><b style="color:var(--amber)">' + d.warningCount + '</b> warnings</span>');
     if (d.errorCount) parts.push('<span><b style="color:var(--red)">' + d.errorCount + '</b> errors</span>');
     if (d.stopped) parts.push('<span><b style="color:var(--red)">stopped early</b></span>');
   }
@@ -939,6 +944,7 @@ async function openResult(id) {
   // Errors first, then the full action list — rendered in chunks so a million-row preview
   // doesn't build a million DOM nodes at once, while the DATA stays complete (uncapped).
   const errHtml = (d.errors || []).map(x => oprow('error', 'err', x.path + ' — ' + x.error, null)).join('') +
+    (d.warnings || []).map(x => oprow('warning', 'skip', x.path + ' — ' + x.warn, null)).join('') +
     (d.skipped || []).map(x => oprow('skipped', 'skip', x.path + ' — ' + x.note, null)).join('');
   const acts = d.actions || [];
   resList = $('#resList');
@@ -1156,6 +1162,41 @@ $('#resetGrand').addEventListener('click', async e => {
   refreshList();
 });
 
+// ── log detail (Karen parity: choose which per-file events land in the log) ─────
+// The checkboxes reflect the server's effective categories (defaults merged with saved
+// overrides); toggling one persists via setLogCats. Summaries/errors/warnings/deletions
+// default ON; the noisy per-file ones (copies/up-to-date/skips/exclusions) default OFF.
+function renderLogCats() {
+  if (!logCatsState) return;
+  document.querySelectorAll('#logCats input[data-cat]').forEach(cb => {
+    cb.checked = !!logCatsState[cb.dataset.cat];
+  });
+}
+document.querySelectorAll('#logCats input[data-cat]').forEach(cb => {
+  cb.addEventListener('change', async () => {
+    const cat = cb.dataset.cat;
+    const prev = logCatsState; // snapshot so a failed save can be rolled back
+    logCatsState = { ...(logCatsState || {}), [cat]: cb.checked };
+    const r = await api('setLogCats', { cats: { [cat]: cb.checked } }).catch(() => null);
+    if (!r || !r.ok) { logCatsState = prev; renderLogCats(); msg((r && r.error) || 'could not save log settings', 'bad'); return; }
+    if (r.logCats) { logCatsState = r.logCats; renderLogCats(); }
+  });
+});
+$('#eraseLog').addEventListener('click', async e => {
+  const b = e.currentTarget;
+  if (b._disarm) { clearTimeout(b._disarm); b._disarm = null; } // never let a stale timer disarm a later cycle
+  if (!b.dataset.armed) {
+    b.dataset.armed = '1'; b.textContent = 'Really erase log?';
+    b._disarm = setTimeout(() => { delete b.dataset.armed; b.textContent = 'Erase log'; b._disarm = null; }, 4000);
+    return;
+  }
+  delete b.dataset.armed; b.textContent = 'Erase log';
+  const r = await api('eraseLog');
+  if (!r.ok) { msg(r.error || 'could not erase the log', 'bad'); return; }
+  $('#logPre').textContent = 'No activity yet.';
+  msg('Activity log erased.', 'info');
+});
+
 // ── completion alert (Karen parity: beep when a run finishes) ─────────────────
 // One shared preference in localStorage (all surfaces share the app's origin; default ON,
 // like Karen); the tones are WebAudio so no asset or external fetch is needed. Only a
@@ -1351,6 +1392,7 @@ function renderLastBand() {
     (best.filtered ? '<span><b>' + n(best.filtered) + '</b> filtered</span>' : '') +
     (best.deleted || best.recycled ? '<span><b>' + n(best.deleted) + '</b> deleted' + (best.recycled ? ' (' + n(best.recycled) + ' recycled)' : '') + '</span>' : '') +
     (best.skippedCount ? '<span><b style="color:var(--amber)">' + n(best.skippedCount) + '</b> skipped</span>' : '') +
+    (best.warningCount ? '<span><b style="color:var(--amber)">' + n(best.warningCount) + '</b> warnings</span>' : '') +
     (best.errorCount ? '<span><b style="color:var(--red)">' + n(best.errorCount) + '</b> errors</span>' : '') +
     (best.stopped ? '<span style="color:var(--amber)">stopped early</span>' : '');
   const html =

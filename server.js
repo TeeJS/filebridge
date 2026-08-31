@@ -178,6 +178,38 @@ function logLine(text) {
     fs.appendFileSync(LOG_PATH, line + '\n');
   } catch {}
 }
+// Per-file detail goes to the FILE ONLY (not the in-memory tail the Activity view shows) — a
+// 7000-file run would otherwise flood the view and push the run summaries out. Batched: one
+// append, not one per line. Full detail lives in log.txt (Open config folder).
+function logToFile(lines) {
+  if (!lines || !lines.length) return;
+  const now = new Date().toLocaleString();
+  const body = lines.map(t => `[${now}] ${t}`).join('\n') + '\n';
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    try { if (fs.statSync(LOG_PATH).size > 2 * 1024 * 1024) fs.writeFileSync(LOG_PATH, logTail.join('\n') + '\n'); } catch {}
+    fs.appendFileSync(LOG_PATH, body);
+  } catch {}
+}
+// Which categories get PER-FILE log entries. Defaults keep the log lean; the user opts into
+// the noisy ones (copies / up-to-date / exclusions) for a detailed audit.
+const DEFAULT_LOG_CATS = { summary: true, errors: true, warnings: true, deletions: true, skips: false, copies: false, uptodate: false, exclusions: false };
+function logCats(cfg) { return { ...DEFAULT_LOG_CATS, ...(((cfg || loadCfg()).logCats) || {}) }; }
+// Write the per-file entries for a finished REAL run, gated by the enabled categories.
+function logRunEntries(name, summary, plan, cats) {
+  const lines = [];
+  const push = (tag, rel, extra) => lines.push(`  ${tag}  ${rel}${extra ? '  — ' + extra : ''}`);
+  if (cats.copies) for (const a of summary.actions || []) if (a.op === 'copy') push('COPIED', a.rel);
+  if (cats.deletions) for (const a of summary.actions || []) if (a.op === 'del' || a.op === 'deldir') push('DELETED', a.rel);
+  if (cats.uptodate) for (const rel of (plan.unchangedList || [])) push('UP-TO-DATE', rel);
+  if (cats.exclusions) for (const rel of (plan.filteredList || [])) push('EXCLUDED', rel);
+  if (cats.skips) for (const s of (summary.skipped || [])) push('SKIPPED', s.path, s.note);
+  if (cats.warnings) for (const w of (summary.warnings || [])) push('WARN', w.path, w.warn);
+  if (cats.errors) for (const e of (summary.errors || [])) push('ERROR', e.path, e.error);
+  if (lines.length) {
+    logToFile([`─── ${name}: ${summary.copied} copied, ${summary.deleted} deleted, ${summary.warningCount || 0} warnings, ${summary.errorCount || 0} errors ───`].concat(lines));
+  }
+}
 
 // ── run queue: one job at a time ──────────────────────────────────────────────
 let jobWin = null;       // the pop-out job-manager window (single instance)
@@ -321,6 +353,7 @@ async function pump() {
   // and the queue jammed forever.
   try {
   let summary;
+  let plan = null, cats = null; // hoisted: the per-file log is written AFTER the summary line (below)
   try {
     if (job.kind === 'web') {
       const rule = web.findRule(job.url, loadRules());
@@ -353,9 +386,10 @@ async function pump() {
       };
       lastResults[job.id] = summary;
       saveResult(job.id, summary);
-      logLine(`${next.dryRun ? 'preview' : 'run'} ${job.name} (${next.trigger}): ` + (w.fatal ? `FAILED — ${w.fatal}`
-        : next.dryRun ? `would download ${w.wouldDownload.length} (${w.skippedSeen} already seen)`
-          : `downloaded ${w.downloaded.length}, ${w.skippedSeen} already seen${summary.errorCount ? `, ${summary.errorCount} ERRORS` : ''}${stopFlag ? ' — STOPPED' : ''}`));
+      if (w.fatal || logCats().summary)
+        logLine(`${next.dryRun ? 'preview' : 'run'} ${job.name} (${next.trigger}): ` + (w.fatal ? `FAILED — ${w.fatal}`
+          : next.dryRun ? `would download ${w.wouldDownload.length} (${w.skippedSeen} already seen)`
+            : `downloaded ${w.downloaded.length}, ${w.skippedSeen} already seen${summary.errorCount ? `, ${summary.errorCount} ERRORS` : ''}${stopFlag ? ' — STOPPED' : ''}`));
       if (!next.dryRun) {
         const fresh = loadCfg();
         const j = (fresh.jobs || []).find(x => x.id === job.id);
@@ -371,10 +405,15 @@ async function pump() {
       }
       return; // the shared finally below clears `current` and pumps the queue
     }
+    // Collect the up-to-date / exclusion lists only when a real run will log those categories
+    // (they can be big on a huge tree), so plan doesn't hold them for nothing.
+    cats = logCats();
+    opts.collectUnchanged = !next.dryRun && cats.uptodate;
+    opts.collectFiltered = !next.dryRun && cats.exclusions;
     const dopts = stored.driveApi
-      ? { getToken: driveToken, onProgress: opts.onProgress, shouldStop: opts.shouldStop, trash }
+      ? { getToken: driveToken, onProgress: opts.onProgress, shouldStop: opts.shouldStop, trash, collectUnchanged: opts.collectUnchanged, collectFiltered: opts.collectFiltered }
       : null;
-    const plan = stored.driveApi ? await drive.planDrive(job, dopts) : await sync.plan(job, opts);
+    plan = stored.driveApi ? await drive.planDrive(job, dopts) : await sync.plan(job, opts);
     const copies = plan.actions.filter(a => a.op === 'copy').length;
     const deletes = plan.actions.length - copies;
     let exec = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: stopFlag };
@@ -394,6 +433,11 @@ async function pump() {
       copied: exec.copied, deleted: exec.deleted, recycled: exec.recycled, bytes: exec.bytes,
       errors: plan.errors.concat(exec.errors),
       errorCount: plan.errors.length + exec.errors.length,
+      // Warnings are non-fatal (e.g. copied fine but couldn't set the timestamp) — tracked
+      // separately so a run isn't marked FAILED over a cosmetic hiccup. ok already excludes
+      // them (they're not in errors).
+      warnings: exec.warnings || [],
+      warningCount: (exec.warnings || []).length,
       // Drive-API natives (Google Docs etc.) surface as skips on preview AND run —
       // parity with the mount's placeholder-skip behavior.
       skipped: (exec.skipped || []).concat(plan.nativeSkipped || []),
@@ -409,14 +453,19 @@ async function pump() {
   lastResults[job.id] = summary;
   saveResult(job.id, summary);
   const what = next.dryRun ? 'preview' : 'run';
-  logLine(`${what} ${job.name} (${next.trigger}): ` + (summary.fatal ? `FAILED — ${summary.fatal}`
-    : next.dryRun ? `would copy ${summary.planCopies}, delete ${summary.planDeletes}${summary.errorCount ? `, ${summary.errorCount} errors` : ''}`
-      : `copied ${summary.copied}, ${summary.recycled ? `recycled ${summary.recycled}, ` : ''}deleted ${summary.deleted}, unchanged ${summary.unchanged}${summary.skippedCount ? `, ${summary.skippedCount} placeholders skipped` : ''}${summary.errorCount ? `, ${summary.errorCount} ERRORS` : ''}${summary.stopped ? ' — STOPPED' : ''}`));
+  // The run-summary line is gated by the 'summary' category (a FAILED run is always logged).
+  if (summary.fatal || logCats().summary)
+    logLine(`${what} ${job.name} (${next.trigger}): ` + (summary.fatal ? `FAILED — ${summary.fatal}`
+      : next.dryRun ? `would copy ${summary.planCopies}, delete ${summary.planDeletes}${summary.errorCount ? `, ${summary.errorCount} errors` : ''}`
+        : `copied ${summary.copied}, ${summary.recycled ? `recycled ${summary.recycled}, ` : ''}deleted ${summary.deleted}, unchanged ${summary.unchanged}${summary.skippedCount ? `, ${summary.skippedCount} placeholders skipped` : ''}${summary.warningCount ? `, ${summary.warningCount} warnings` : ''}${summary.errorCount ? `, ${summary.errorCount} ERRORS` : ''}${summary.stopped ? ' — STOPPED' : ''}`));
+  // Per-file detail LAST — after the summary line — so a big batch that trips the summary
+  // line's rotation-to-tail can't truncate away the detail written this same run.
+  if (!next.dryRun && !summary.fatal && plan) { try { logRunEntries(job.name, summary, plan, cats); } catch {} }
   if (!next.dryRun) {
     const fresh = loadCfg(); // reload — the user may have edited other jobs mid-run
     const j = (fresh.jobs || []).find(x => x.id === job.id);
     if (j) {
-      j.lastRun = { at: summary.at, ok: summary.ok, copied: summary.copied, deleted: summary.deleted, errors: summary.errorCount, ms: summary.ms };
+      j.lastRun = { at: summary.at, ok: summary.ok, copied: summary.copied, deleted: summary.deleted, errors: summary.errorCount, warnings: summary.warningCount || 0, ms: summary.ms };
       delete j.lastSkippedDue;
       // Lifetime accumulators (Karen's History): every real run adds to the per-job totals.
       const s = j.stats || (j.stats = { since: summary.at, runs: 0, ms: 0, bytes: 0, copied: 0, deleted: 0, recycled: 0, scanned: 0, unchanged: 0, filtered: 0, errors: 0 });
@@ -522,8 +571,22 @@ exports.handle = async function handle(action, ctx) {
     return {
       ok: true, jobs, grand: cfg.grand || null, dataDir: DATA_DIR, current, queue: queue.map(q => q.id),
       rules: Object.values(rules).map(r => ({ site: r.site, name: r.name || r.site, match: r.match })),
-      sessions, lastResults: slim(), drive: driveInfo, paused: !!cfg.paused,
+      sessions, lastResults: slim(), drive: driveInfo, paused: !!cfg.paused, logCats: logCats(cfg),
     };
+  }
+
+  // Configure which categories get per-file log entries, and clear the log file.
+  if (action === 'setLogCats') {
+    const cfg = loadCfg();
+    cfg.logCats = { ...DEFAULT_LOG_CATS, ...(cfg.logCats || {}), ...(body.cats || {}) };
+    saveCfg(cfg, false);
+    return { ok: true, logCats: logCats(cfg) };
+  }
+  if (action === 'eraseLog') {
+    try { fs.writeFileSync(LOG_PATH, ''); } catch (e) { return { ok: false, error: e.message }; }
+    logTail.length = 0;
+    logLine('log erased');
+    return { ok: true };
   }
 
   // Global scheduler pause: stop all scheduled runs (manual Run/Preview still work). Persisted,
@@ -895,7 +958,7 @@ exports.handle = async function handle(action, ctx) {
 function slim() {
   const out = {};
   for (const [id, r] of Object.entries(lastResults)) {
-    out[id] = { at: r.at, ok: r.ok, dryRun: r.dryRun, trigger: r.trigger, ms: r.ms, kind: r.kind, copied: r.copied, bytes: r.bytes, deleted: r.deleted, recycled: r.recycled, scanned: r.scanned, unchanged: r.unchanged, filtered: r.filtered, mirrorProtected: r.mirrorProtected, skippedCount: r.skippedCount, skippedSeen: r.skippedSeen, needsLogin: r.needsLogin, collectionsVisited: r.collectionsVisited, foldersScanned: r.foldersScanned, foldersCreated: r.foldersCreated, foldersDeleted: r.foldersDeleted, planCopies: r.planCopies, planDeletes: r.planDeletes, errorCount: r.errorCount, stopped: r.stopped, mirrorSkipped: r.mirrorSkipped, fatal: r.fatal };
+    out[id] = { at: r.at, ok: r.ok, dryRun: r.dryRun, trigger: r.trigger, ms: r.ms, kind: r.kind, copied: r.copied, bytes: r.bytes, deleted: r.deleted, recycled: r.recycled, scanned: r.scanned, unchanged: r.unchanged, filtered: r.filtered, mirrorProtected: r.mirrorProtected, skippedCount: r.skippedCount, skippedSeen: r.skippedSeen, needsLogin: r.needsLogin, collectionsVisited: r.collectionsVisited, foldersScanned: r.foldersScanned, foldersCreated: r.foldersCreated, foldersDeleted: r.foldersDeleted, planCopies: r.planCopies, planDeletes: r.planDeletes, errorCount: r.errorCount, warningCount: r.warningCount, stopped: r.stopped, mirrorSkipped: r.mirrorSkipped, fatal: r.fatal };
   }
   return out;
 }

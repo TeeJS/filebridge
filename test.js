@@ -1076,6 +1076,53 @@ async function run(j) {
   assert(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/', dest: 'relative' }, ruleMap));
   assert(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/', dest: 'D:\\Drops', backfill: 1.5 }, ruleMap));
 
+  // ── warnings tier: a timestamp-set failure is a WARNING, not an error ──
+  // A file that copies fine but whose mtime can't be set must NOT fail the run — it lands
+  // in exec.warnings, exec.errors stays empty, and the server-side ok stays true.
+  reset();
+  write(SRC, 'w.txt', 'hello');
+  const realUtimes = fsp.utimes;
+  fsp.utimes = () => Promise.reject(new Error('simulated timestamp failure'));
+  let warnRun;
+  try { warnRun = await run(job()); } finally { fsp.utimes = realUtimes; }
+  assert(exists(DST, 'w.txt'), 'file still copied despite the timestamp failure');
+  assert.equal(warnRun.exec.errors.length, 0, 'a timestamp failure is not counted as an error');
+  assert(warnRun.exec.warnings.length >= 1, 'the timestamp failure is recorded as a warning');
+  assert(warnRun.exec.warnings.some(w => w.path === 'w.txt' && /timestamp/i.test(w.warn)),
+    'the warning names the file and the reason');
+  const okWithWarnings = !warnRun.exec.stopped && !warnRun.plan.errors.length && !warnRun.exec.errors.length;
+  assert(okWithWarnings, 'a run with only warnings is still ok (server ok formula)');
+
+  // ...and a read-only attribute that can't be applied is ALSO a warning (not silently dropped).
+  reset();
+  const roSrc = write(SRC, 'ro.txt', 'locked');
+  fs.chmodSync(roSrc, 0o444);                 // read-only source -> plan sets a.readonly
+  const realChmod = fsp.chmod;
+  fsp.chmod = (p, m) => (m === 0o444 || m === 0o555)
+    ? Promise.reject(new Error('simulated attribute failure')) // fail only the mirror set, not unlock()
+    : realChmod(p, m);
+  let roRun;
+  try { roRun = await run(job({ mirrorMeta: true })); } finally { fsp.chmod = realChmod; fs.chmodSync(roSrc, 0o666); }
+  assert(exists(DST, 'ro.txt'), 'read-only file still copied');
+  assert.equal(roRun.exec.errors.length, 0, 'a read-only-attribute failure is not an error');
+  assert(roRun.exec.warnings.some(w => w.path === 'ro.txt' && /read-only/i.test(w.warn)),
+    'the read-only-attribute failure is recorded as a warning');
+
+  // ── log-detail collection: unchanged/filtered lists are opt-in ──
+  // The detailed log needs the list of up-to-date + excluded paths, but only when the user
+  // turns those categories on — otherwise the plan must not pay the memory cost.
+  reset();
+  write(SRC, 'keep.txt', 'x');
+  write(SRC, 'skip.tmp', 'y');
+  await run(job({ exclude: '*.tmp' }));                 // first run copies keep.txt (mtime mirrored), excludes skip.tmp
+  const collectOff = await sync.plan(job({ exclude: '*.tmp' }));
+  assert(collectOff.unchanged >= 1, 'keep.txt is up-to-date on the second plan');
+  assert.deepEqual(collectOff.unchangedList, [], 'unchanged paths NOT collected without the flag');
+  assert.deepEqual(collectOff.filteredList, [], 'filtered paths NOT collected without the flag');
+  const collectOn = await sync.plan(job({ exclude: '*.tmp' }), { collectUnchanged: true, collectFiltered: true });
+  assert(collectOn.unchangedList.includes('keep.txt'), 'unchanged path collected when opted in');
+  assert(collectOn.filteredList.includes('skip.tmp'), 'filtered path collected when opted in');
+
   fs.rmSync(ROOT, { recursive: true, force: true });
   console.log('file-bridge: all self-checks passed');
 })().catch(e => { console.error('FAIL:', e); process.exit(1); });

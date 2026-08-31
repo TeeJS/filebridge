@@ -95,6 +95,7 @@
   .c-muted { color: var(--muted); font-weight: 400; }
   .c-ok { color: var(--green); } .c-ok .dot { background: var(--green); }
   .c-up { color: var(--blue); } .c-up .dot { background: var(--blue); }
+  .c-warn { color: var(--amber); } .c-warn .dot { background: var(--amber); }
   .c-bad { color: var(--red); } .c-bad .dot { background: var(--red); }
   .c-work { color: var(--text); } .c-work .dot { animation: pulse 1s infinite; background: var(--accent); }
   @keyframes pulse { 0%,100% { opacity: .3 } 50% { opacity: 1 } }
@@ -244,6 +245,9 @@
   .logpre { flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
             background: var(--panel); font: 500 14px/1.7 var(--mono); padding: 12px 16px; white-space: pre-wrap;
             word-break: break-all; color: var(--muted); margin: 0; }
+  .logcats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; padding: 4px 2px 10px; }
+  .logcats .lcttl { font-size: 14px; color: var(--muted); font-weight: 700; margin-right: 4px; }
+  .logcats .chk { min-height: 32px; font-size: 14px; }
 
   .link { color: var(--accent); text-decoration: none; }
   .link:hover { text-decoration: underline; }
@@ -610,12 +614,24 @@
   </div>
   <div class="vbody">
     <div class="summary" id="grandLine" hidden style="font-size:14px"></div>
+    <div class="logcats" id="logCats">
+      <span class="lcttl">Log detail:</span>
+      <label class="chk"><input type="checkbox" data-cat="summary"> Run summaries</label>
+      <label class="chk"><input type="checkbox" data-cat="errors"> Errors</label>
+      <label class="chk"><input type="checkbox" data-cat="warnings"> Warnings</label>
+      <label class="chk"><input type="checkbox" data-cat="deletions"> Deletions</label>
+      <label class="chk"><input type="checkbox" data-cat="copies"> Every copy</label>
+      <label class="chk"><input type="checkbox" data-cat="uptodate"> Up-to-date</label>
+      <label class="chk"><input type="checkbox" data-cat="skips"> Skips</label>
+      <label class="chk"><input type="checkbox" data-cat="exclusions"> Exclusions</label>
+    </div>
     <pre class="logpre" id="logPre"></pre>
   </div>
   <div class="vfoot">
     <span class="vstat">Jobs are stored in <span id="dataDir" style="font-family:var(--mono)"></span> — copy jobs.json to another machine to move them.</span>
     <span class="grow"></span>
     <label class="chk"><input type="checkbox" id="alertSound" checked> Beep when a run finishes</label>
+    <button id="eraseLog">Erase log</button>
     <button id="resetGrand" hidden>Reset totals</button>
     <button id="openData">Open config folder</button>
   </div>
