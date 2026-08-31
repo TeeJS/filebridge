@@ -12,6 +12,7 @@ const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const sync = require('./sync');
 
 const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
@@ -320,7 +321,7 @@ async function planDrive(job, deps) {
 // first and restored if the download fails — an interrupted download can never leave
 // a truncated file where a good backup used to be. Deletions (mirror) are delegated
 // to sync.execute so Recycle Bin/unlock behavior stays identical.
-async function downloadTo(deps, driveId, dest, exportMime) {
+async function downloadTo(deps, driveId, dest, exportMime, onBytes) {
   const f = deps.fetchImpl || fetch;
   const token = await deps.getToken();
   if (!token) throw new Error('Google Drive is not connected');
@@ -344,7 +345,10 @@ async function downloadTo(deps, driveId, dest, exportMime) {
       }
       throw new Error((exportMime ? 'export' : 'download') + ' failed HTTP ' + res.status + ': ' + body.slice(0, 200));
     }
-    await pipeline(res.body, fs.createWriteStream(dest), { signal: ac.signal });
+    // Count bytes as they stream so the run bar shows within-file progress on big files.
+    let wrote = 0;
+    const counter = new Transform({ transform(chunk, enc, cb) { wrote += chunk.length; if (onBytes) onBytes(wrote); cb(null, chunk); } });
+    await pipeline(res.body, counter, fs.createWriteStream(dest), { signal: ac.signal });
   } catch (e) {
     if (ac.signal.aborted || e.name === 'AbortError') throw new Error('stopped'); // executeDrive maps this to a clean stop
     throw e;
@@ -360,7 +364,7 @@ async function executeDrive(job, actions, deps) {
     const made = await fsp.mkdir(dir, { recursive: true });
     if (made) res.foldersCreated += 1 + (dir.length > made.length ? dir.slice(made.length).split(path.sep).filter(Boolean).length : 0);
   }
-  const dl = deps.downloadTo || ((id, to, exportMime) => downloadTo(deps, id, to, exportMime));
+  const dl = deps.downloadTo || ((id, to, exportMime, onBytes) => downloadTo(deps, id, to, exportMime, onBytes));
   const copies = actions.filter(x => x.op === 'copy');
   const dels = actions.filter(x => x.op === 'del' || x.op === 'deldir');
   const total = copies.length + dels.length;
@@ -379,7 +383,16 @@ async function executeDrive(job, actions, deps) {
         const old = to + '.~fsync-old';
         try { await fsp.access(old); try { await fsp.rm(to, { force: true }); } catch {}; await fsp.rename(old, to); } catch {}
       }
-      await dl(a.driveId, tmp, a.exportMime);
+      // Live within-file progress: report streamed bytes (throttled) so a multi-GB file's
+      // bar moves and the run bar can show a MB/s rate instead of sitting frozen.
+      let lastEmit = 0;
+      const onBytes = w => {
+        const now = Date.now();
+        if (now - lastEmit < 150 && (!a.size || w < a.size)) return;
+        lastEmit = now;
+        if (deps.onProgress) deps.onProgress({ phase: 'run', done, total, op: 'copy', rel: a.rel, reason: a.reason, bytes: res.bytes + w, fileBytes: w, fileTotal: a.size || 0 });
+      };
+      await dl(a.driveId, tmp, a.exportMime, onBytes);
       // An export's byte size is unknown until it's written — measure it for the stats
       // (a second attempt after the swap covers a transient stat failure on the temp).
       let wrote = a.size || 0;

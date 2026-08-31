@@ -281,6 +281,9 @@ async function pump() {
   current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, disk: null, startedAt: Date.now() };
   const t0 = Date.now();
   diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); // async — non-blocking
+  // Live free space: refresh the destination's free/total every few seconds so a long run's
+  // disk bar tracks reality instead of the value captured at start.
+  const diskTimer = setInterval(() => { diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); }, 4000);
   // Recycle Bin support for the engine: only Electron's shell can move a path to the Recycle
   // Bin. Resolves true on success, false on any failure (e.g. no Recycle Bin on a network share).
   const trash = async p => {
@@ -377,6 +380,7 @@ async function pump() {
     let exec = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: stopFlag };
     if (!next.dryRun && !stopFlag) {
       current.phase = 'run';
+      current.totalBytes = plan.totalBytes; // denominator for the byte-based progress bar
       exec = stored.driveApi ? await drive.executeDrive(job, plan.actions, dopts) : await sync.execute(job, plan.actions, { ...opts, folderMeta: plan.folderMeta });
     }
     if (plan.mirrorSkipped) logLine(`WARNING ${job.name}: ${plan.mirrorSkipped}`);
@@ -436,6 +440,7 @@ async function pump() {
     saveCfg(fresh, false);
   }
   } finally {
+    clearInterval(diskTimer);
     current = null;
     pump();
   }
@@ -456,6 +461,7 @@ function nextDue(j) { return j.enabled === false ? null : sync.nextOccurrence(j.
 function tick() {
   let cfg;
   try { cfg = loadCfg(); } catch { return; }
+  if (cfg.paused) return; // scheduler paused globally — manual runs still work (they don't go through tick)
   const now = Date.now();
   for (const j of cfg.jobs || []) {
     if (j.enabled === false || busy(j.id)) continue;
@@ -516,8 +522,18 @@ exports.handle = async function handle(action, ctx) {
     return {
       ok: true, jobs, grand: cfg.grand || null, dataDir: DATA_DIR, current, queue: queue.map(q => q.id),
       rules: Object.values(rules).map(r => ({ site: r.site, name: r.name || r.site, match: r.match })),
-      sessions, lastResults: slim(), drive: driveInfo,
+      sessions, lastResults: slim(), drive: driveInfo, paused: !!cfg.paused,
     };
+  }
+
+  // Global scheduler pause: stop all scheduled runs (manual Run/Preview still work). Persisted,
+  // so it survives a restart — the UI shows a clear "schedules paused" indicator.
+  if (action === 'setPaused') {
+    const cfg = loadCfg();
+    cfg.paused = !!body.paused;
+    saveCfg(cfg, false);
+    logLine('schedules ' + (cfg.paused ? 'PAUSED' : 'resumed'));
+    return { ok: true, paused: cfg.paused };
   }
 
   if (action === 'driveConnect') {
@@ -534,7 +550,7 @@ exports.handle = async function handle(action, ctx) {
     catch (e) { return { ok: false, error: e.message }; }
   }
 
-  if (action === 'status') return { ok: true, current, queue: queue.map(q => q.id), lastResults: slim(), log: logTail.slice(-120) };
+  if (action === 'status') { let paused = false; try { paused = !!loadCfg().paused; } catch {} return { ok: true, current, queue: queue.map(q => q.id), lastResults: slim(), log: logTail.slice(-120), paused }; }
 
   if (action === 'result') {
     const id = String(body.id || (ctx.query && ctx.query.id) || '');

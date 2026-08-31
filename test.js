@@ -616,6 +616,13 @@ async function run(j) {
     // sched preview validates with the same code the scheduler uses
     assert((await call('sched', { schedule: { type: 'every', mins: 90, start: Date.now() } })).ok);
     assert(!(await call('sched', { schedule: { type: 'every', days: 0.5, start: Date.now() } })).ok);
+    // global scheduler pause: persisted, reported by list + status, resumable
+    assert.equal((await call('list')).paused, false, 'not paused by default');
+    assert.equal((await call('setPaused', { paused: true })).paused, true);
+    assert.equal((await call('list')).paused, true, 'list reflects the pause');
+    assert.equal((await call('status')).paused, true, 'status reflects the pause (for the live poll)');
+    await call('setPaused', { paused: false });
+    assert.equal((await call('status')).paused, false, 'resumed');
     // runMany: explicitly selected jobs run even when disabled (Karen's Run Highlighted)
     const sv2 = await call('save', { job: { name: 'srv2', source: SRC, dest: path.join(ROOT, 'dst2'), enabled: false, recycle: false, schedule: { type: 'manual' } } });
     assert(sv2.ok, sv2.error);
@@ -977,6 +984,17 @@ async function run(j) {
     assert.equal(stoppedRes.stopped, true, 'in-flight download is aborted on stop');
     assert.equal(stoppedRes.errors.length, 0, 'a stop is not an error');
     assert(!fs.existsSync(path.join(DST, 'big.bin')), 'no partial file left behind on stop');
+    // within-file progress: streamed bytes are reported as fileBytes / fileTotal
+    reset(); fs.mkdirSync(DST, { recursive: true });
+    const streamFetch = async () => ({ ok: true, status: 200, text: async () => '',
+      body: Readable.from([Buffer.alloc(1000, 65), Buffer.alloc(1000, 66)]) });
+    const seenP = [];
+    const de3 = await drive.executeDrive(djob({}),
+      [{ op: 'copy', rel: 'big.bin', size: 2000, mtimeMs: T1ms, driveId: 'x' }],
+      { getToken: async () => 't', fetchImpl: streamFetch, shouldStop: () => false, onProgress: p => { if (p.fileTotal) seenP.push(p); } });
+    assert.equal(de3.copied, 1);
+    assert(seenP.some(p => p.fileBytes > 0 && p.fileTotal === 2000), 'within-file byte progress is reported');
+    assert.equal(fs.readFileSync(path.join(DST, 'big.bin')).length, 2000, 'the file is written whole');
   }
 
   // ── web jobs: rule validation, URL matching, ledger decisions (web.js, pure part) ──

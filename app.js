@@ -37,6 +37,27 @@ let jobs = [];
 let grand = null;
 let rules = [], sessions = [];
 let driveInfo = null; // host OAuth status for the Google Drive API ({available, configured, connected})
+let paused = false;   // global scheduler pause (manual runs still work)
+function renderPause() {
+  const b = $('#pauseToggle');
+  if (!b) return;
+  b.textContent = paused ? '▶ Schedules paused' : 'Pause schedules';
+  b.classList.toggle('paused', paused);
+}
+// Smoothed transfer rate (bytes/sec) from cumulative bytes over wall-clock; resets per run
+// (keyed by the run's startedAt) and recomputes at most a few times a second to stay steady.
+let _rate = { key: 0, bytes: 0, t: 0, ema: 0 };
+function transferRate(runKey, bytes) {
+  const now = performance.now();
+  if (runKey !== _rate.key) { _rate = { key: runKey, bytes, t: now, ema: 0 }; return 0; }
+  const dt = (now - _rate.t) / 1000;
+  if (dt >= 0.3) {
+    const inst = Math.max(0, (bytes - _rate.bytes) / dt);
+    _rate.ema = _rate.ema ? _rate.ema * 0.6 + inst * 0.4 : inst;
+    _rate.bytes = bytes; _rate.t = now;
+  }
+  return _rate.ema;
+}
 let current = null, queueIds = [], lastResults = {};
 let pendingPreview = null; // job id whose preview should auto-open when it finishes
 // Row selection for "Run selected" (Karen's Run Highlighted) — page-local, distinct from a
@@ -220,6 +241,7 @@ async function refreshList() {
   grand = r.grand || null;
   rules = r.rules || []; sessions = r.sessions || [];
   driveInfo = r.drive || null;
+  paused = !!r.paused; renderPause();
   current = r.current; queueIds = r.queue || []; lastResults = r.lastResults || {};
   for (const id of [...selected]) if (!jobs.some(j => j.id === id)) selected.delete(id); // drop deleted jobs
   $('#dataDir').textContent = r.dataDir || '';
@@ -1080,6 +1102,12 @@ $('#recDone').addEventListener('click', () => { stashRuleEdit(); showView('Main'
 
 // ── log view ──────────────────────────────────────────────────────────────────
 $('#openLog').hidden = LAUNCHER; // embed is list-only; the log lives in the window
+$('#pauseToggle').addEventListener('click', async () => {
+  const r = await api('setPaused', { paused: !paused });
+  if (!r.ok) { msg(r.error, 'bad'); return; }
+  paused = r.paused; renderPause();
+  msg(paused ? 'Schedules paused — nothing runs automatically until you resume. Manual Run/Preview still work.' : 'Schedules resumed.', paused ? 'info' : 'ok');
+});
 $('#openLog').addEventListener('click', () => showView('Log'));
 $('#logBack').addEventListener('click', () => showView('Main'));
 $('#openData').addEventListener('click', () => api('openData'));
@@ -1169,6 +1197,7 @@ let hadCurrent = false;
 async function poll() {
   const r = await api('status').catch(() => null);
   if (!r || !r.ok) return;
+  if (typeof r.paused === 'boolean' && r.paused !== paused) { paused = r.paused; renderPause(); }
   current = r.current; queueIds = r.queue || []; lastResults = r.lastResults || {};
   beepOnFinished();
   renderLastBand();
@@ -1236,12 +1265,17 @@ function renderRunbar() {
   $('#runDst').textContent = full(current.dest, rel);
   if (current.phase === 'run') {
     if (p.phase === 'run' && p.total) {
-      $('#runPhase').textContent = (current.dryRun ? 'Previewing' : 'Copying') + ' — file ' + p.done.toLocaleString() + ' of ' + p.total.toLocaleString();
-      $('#runFill').style.width = Math.round(p.done / p.total * 100) + '%';
+      // Within-file progress (Drive downloads report streamed bytes) + a byte-based overall
+      // bar so a single big file still moves the bar, plus a live MB/s rate.
+      const filePct = p.fileTotal ? ' · ' + Math.round(Math.min(1, p.fileBytes / p.fileTotal) * 100) + '% of this file' : '';
+      $('#runPhase').textContent = (current.dryRun ? 'Previewing' : 'Copying') + ' — file ' + p.done.toLocaleString() + ' of ' + p.total.toLocaleString() + (deleting ? '' : filePct);
+      const bytePct = current.totalBytes ? Math.min(1, (p.bytes || 0) / current.totalBytes) : (p.done / p.total);
+      $('#runFill').style.width = Math.round(bytePct * 100) + '%';
       $('#runOp').className = 'runop ' + (deleting ? 'del' : 'copy');
       $('#runOp').textContent = deleting ? 'delete' : 'copy';
       $('#runReason').textContent = p.reason ? '(' + p.reason + ')' : '';
-      $('#runCounts').innerHTML = 'Copied <b>' + fmtBytes(p.bytes || 0) + '</b>';
+      const rate = transferRate(current.startedAt, p.bytes || 0);
+      $('#runCounts').innerHTML = 'Copied <b>' + fmtBytes(p.bytes || 0) + '</b>' + (rate > 0 ? ' · <b>' + fmtBytes(rate) + '/s</b>' : '');
     } else {
       // Scan is done but the first copy hasn't completed yet — don't show a stale verdict.
       $('#runPhase').textContent = 'Copying — starting…';

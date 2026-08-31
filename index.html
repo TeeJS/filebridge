@@ -116,6 +116,8 @@
   /* Header Accounts button flags attention (a dropped session / unconnected Drive) so the
      user notices before scrolling to the bottom strip. */
   #openAccounts.needs { border-color: var(--amber); color: var(--amber); }
+  /* Scheduler paused: the toggle turns amber and reads "Schedules paused" so it's obvious. */
+  #pauseToggle.paused { border-color: var(--amber); color: var(--amber); font-weight: 600; }
 
   /* Live run progress band */
   #runbar { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 14px 32px;
@@ -361,6 +363,7 @@
     <span id="msg"></span>
     <span class="job-count" id="count"></span>
     <button id="openWin" hidden>Open in window</button>
+    <button id="pauseToggle" title="Pause all scheduled runs — manual Run/Preview still work">Pause schedules</button>
     <button id="openLog">Activity</button>
     <button id="openRules">Rules</button>
     <button id="openAccounts" hidden>Accounts</button>
