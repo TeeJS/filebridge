@@ -38,7 +38,7 @@ function reset() {
 const job = o => ({ name: 't', source: SRC, dest: DST, ...o });
 async function run(j) {
   const p = await sync.plan(j);
-  const e = await sync.execute(j, p.actions);
+  const e = await sync.execute(j, p.actions, { folderMeta: p.folderMeta }); // as the server calls it
   return { plan: p, exec: e };
 }
 
@@ -649,6 +649,25 @@ async function run(j) {
   } finally {
     server._shutdown();
   }
+
+  // ── mirror source timestamps (opt-in mirrorMeta): file atime + folder mtime, applied
+  //    after the copies so a folder's time isn't re-bumped by writing its children ──
+  reset();
+  const oldT = new Date('2021-06-07T08:09:10Z'), oldA = new Date('2021-06-08T01:02:03Z');
+  write(SRC, 'keep/a.txt', 'A');
+  fs.utimesSync(path.join(SRC, 'keep/a.txt'), oldA, oldT); // atime=oldA, mtime=oldT
+  fs.utimesSync(path.join(SRC, 'keep'), oldA, oldT);       // source folder time (set LAST)
+  r = await run(job({ mirrorMeta: true }));
+  let da = fs.statSync(path.join(DST, 'keep/a.txt'));
+  assert(Math.abs(da.mtimeMs - oldT.getTime()) < 2000, 'copied file mtime matches source');
+  assert(Math.abs(da.atimeMs - oldA.getTime()) < 2000, 'copied file access time matches source (mirrorMeta)');
+  assert(Math.abs(fs.statSync(path.join(DST, 'keep')).mtimeMs - oldT.getTime()) < 2000, 'dest folder mtime matches source, applied after the copies');
+  // OFF (default): folder time is NOT mirrored — the dest folder keeps its just-created time
+  reset();
+  write(SRC, 'sub/c.txt', 'C');
+  fs.utimesSync(path.join(SRC, 'sub'), oldA, oldT);
+  await run(job({}));
+  assert(Math.abs(fs.statSync(path.join(DST, 'sub')).mtimeMs - oldT.getTime()) > 2000, 'folder time NOT mirrored when the option is off');
 
   // ── Drive API source (drive.js) against a fake Drive REST server ──
   {

@@ -487,8 +487,10 @@
       <label class="chk"><input type="checkbox" id="fMirror"> Mirror deletions</label>
       <label class="chk"><input type="checkbox" id="fDelBefore"> Delete old copy before creating new</label>
       <label class="chk"><input type="checkbox" id="fFollowLnk"> Follow shortcuts</label>
+      <label class="chk"><input type="checkbox" id="fMirrorMeta"> Match source timestamps &amp; read-only</label>
     </div>
     <p class="fhelp folderOnly">Follow shortcuts copies what a .lnk points at — a Google Drive folder shortcut becomes a real folder (named like the shortcut) with the target's content — instead of copying the useless .lnk file itself.</p>
+    <p class="fhelp folderOnly">Match source timestamps &amp; read-only stamps each copied file <b>and folder</b> with the source's modified/access time and its read-only attribute (folder times are applied after copying, so they stick). Creation time can't be set from here on Windows, so it stays the copy date. Local folder jobs only.</p>
     <div class="frow folderOnly">
       <label class="fl">Copy</label>
       <label class="chk"><input type="checkbox" id="fChanged" checked> Only files that changed or are new</label>

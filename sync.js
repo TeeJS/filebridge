@@ -341,8 +341,14 @@ async function plan(job, opts = {}) {
   const inc = compileGlobs(job.include), exc = compileGlobs(job.exclude);
   const sub = job.subfolders !== false;
   const cmp = resolveCompare(job);
-  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null };
+  const out = { actions: [], scanned: 0, unchanged: 0, filtered: 0, mirrorProtected: 0, foldersScanned: 0, totalBytes: 0, errors: [], mirrorSkipped: null, folderMeta: [] };
   const stop = () => opts.shouldStop && opts.shouldStop();
+  // Mirror source timestamps + read-only attribute onto the destination (opt-in). Creation
+  // time can't be set on this stack — Node has no birthtime API and the alternatives (native
+  // module / shell) are off-limits — so this is the archival-fidelity SUBSET: modified/access
+  // time and the read-only bit, for files AND folders. folderMeta carries source folder stats
+  // for execute() to apply after the copy phase (a folder's mtime is bumped by writing into it).
+  const mirrorMeta = job.mirrorMeta === true;
   // Report the file currently being examined so the UI can show live Source/Destination
   // paths — first without a verdict (content compare can take a while on a big file),
   // then again with the decision, so the run bar shows UP-TO-DATE / copy / filtered
@@ -393,7 +399,7 @@ async function plan(job, opts = {}) {
       } catch { reason = 'new file'; } // dest missing -> always copy
     }
     if (reason) {
-      const a = { op: 'copy', rel, size: s.size, mtimeMs: s.mtimeMs, reason };
+      const a = { op: 'copy', rel, size: s.size, mtimeMs: s.mtimeMs, atimeMs: s.atimeMs, readonly: !(s.mode & 0o200), reason };
       if (virtual) a.from = abs; // execute copies from the shortcut target, not src+rel
       out.actions.push(a); out.totalBytes += s.size; prog(rel, 'copy', reason);
     } else { out.unchanged++; prog(rel, 'same'); }
@@ -446,6 +452,11 @@ async function plan(job, opts = {}) {
     try { entries = await fsp.readdir(absDir, { withFileTypes: true }); }
     catch (e) { out.errors.push({ path: relDir || absDir, error: e.message }); return; }
     out.foldersScanned++; // every source folder actually read, the root included (Karen's Processed folders)
+    // Record this source folder's times/attrs to mirror after copying — but never the dest
+    // ROOT (relDir empty), which is the user's own destination and not ours to restamp.
+    if (mirrorMeta && relDir) {
+      try { const fst = await fsp.stat(absDir); out.folderMeta.push({ rel: relDir, mtimeMs: fst.mtimeMs, atimeMs: fst.atimeMs, readonly: !(fst.mode & 0o200) }); } catch {}
+    }
     const siblings = followLnk ? new Set(entries.map(e => e.name.toLowerCase())) : null;
     for (const ent of entries) {
       if (stop()) return;
@@ -535,6 +546,7 @@ async function isPlaceholderFailure(e, rel, srcPath) {
 async function execute(job, actions, opts = {}) {
   const src = String(job.source), dst = String(job.dest);
   const res = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: false };
+  const mirrorMeta = job.mirrorMeta === true; // match source atime + read-only bit (opt-in)
   // mkdir(recursive) returns the FIRST directory it created (undefined if all existed), so
   // the segments from there down to the target are exactly the folders created just now.
   async function ensureDir(dir) {
@@ -614,8 +626,11 @@ async function execute(job, actions, opts = {}) {
         // A copied file is KEPT even when the timestamp can't be set (Karen warns and keeps
         // it — NAS shares sometimes allow data writes but deny attribute writes); the only
         // cost is that changed-only passes recopy it until the timestamp sticks.
-        try { await fsp.utimes(to, new Date(), new Date(a.mtimeMs)); }
+        try { await fsp.utimes(to, mirrorMeta && a.atimeMs != null ? new Date(a.atimeMs) : new Date(), new Date(a.mtimeMs)); }
         catch (e) { res.errors.push({ path: a.rel, error: 'copied, but could not set the timestamp: ' + e.message }); }
+        // Mirror the source's read-only attribute onto the copy (opt-in). Set LAST — the next
+        // run's unlock() clears it before overwriting, so it never blocks a future copy.
+        if (mirrorMeta && a.readonly) { try { await fsp.chmod(to, 0o444); } catch {} }
         res.copied++; res.bytes += a.size || 0;
       } else if (a.op === 'del' || a.op === 'deldir') {
         if (await removePath(to, a.rel)) { res.deleted++; if (a.op === 'deldir') res.foldersDeleted++; }
@@ -629,6 +644,21 @@ async function execute(job, actions, opts = {}) {
     }
     done++;
     if (opts.onProgress) opts.onProgress({ phase: 'run', done, total: actions.length, op: a.op, rel: a.rel, reason: a.reason, bytes: res.bytes });
+  }
+  // Mirror folder timestamps + read-only attribute, DEEPEST-FIRST. All file copies and mirror
+  // deletions are done by now, so a folder's mtime won't be re-bumped by a later child write.
+  if (mirrorMeta && Array.isArray(opts.folderMeta) && opts.folderMeta.length && !res.stopped) {
+    const metas = opts.folderMeta.slice().sort((x, y) => y.rel.split('/').length - x.rel.split('/').length);
+    for (const m of metas) {
+      if (opts.shouldStop && opts.shouldStop()) { res.stopped = true; break; }
+      const dir = path.join(dst, m.rel);
+      try { await fsp.access(dir); } catch { continue; } // no dest folder (everything under it filtered)
+      // Time FIRST (on a still-writable folder), then the read-only bit — order that can't
+      // trip on a folder we just made read-only. The bit is harmless to file ops inside it.
+      try { await fsp.utimes(dir, m.atimeMs != null ? new Date(m.atimeMs) : new Date(), new Date(m.mtimeMs)); }
+      catch (e) { res.errors.push({ path: m.rel, error: 'could not set the folder timestamp: ' + e.message }); }
+      if (m.readonly) { try { await fsp.chmod(dir, 0o555); } catch {} }
+    }
   }
   return res;
 }

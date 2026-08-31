@@ -584,6 +584,7 @@ function openEdit(j) {
   $('#fSub').checked = !j || j.subfolders !== false;
   $('#fDelBefore').checked = !!(j && j.deleteBeforeCopy);
   $('#fFollowLnk').checked = !!(j && j.followShortcuts);
+  $('#fMirrorMeta').checked = !!(j && j.mirrorMeta);
   $('#fMirror').checked = !!(j && j.mirror);
   $('#fRecycle').checked = !j || j.recycle !== false;
   $('#fTestSrc').checked = !j || j.testSource !== false;
@@ -641,7 +642,7 @@ $('#fSave').addEventListener('click', async () => {
       schedule: sc, runIfMissed: $('#fMissed').checked,
     };
     // folder-only fields have no meaning on a web job (e.g. after switching the type)
-    for (const k of ['source', 'mirror', 'include', 'exclude', 'compare', 'subfolders', 'subfolderFromSource', 'driveApi', 'exportNative', 'deleteBeforeCopy', 'followShortcuts', 'recycle', 'testSource', 'changedOnly']) delete job[k];
+    for (const k of ['source', 'mirror', 'include', 'exclude', 'compare', 'subfolders', 'subfolderFromSource', 'driveApi', 'exportNative', 'deleteBeforeCopy', 'followShortcuts', 'mirrorMeta', 'recycle', 'testSource', 'changedOnly']) delete job[k];
   } else {
     job = {
       ...(old || {}), id: editId || undefined,
@@ -656,6 +657,7 @@ $('#fSave').addEventListener('click', async () => {
       exportNative: $('#fExportNative').checked,
       deleteBeforeCopy: $('#fDelBefore').checked,
       followShortcuts: $('#fFollowLnk').checked,
+      mirrorMeta: $('#fMirrorMeta').checked,
       recycle: $('#fRecycle').checked, testSource: $('#fTestSrc').checked,
       include: splitGlobs($('#fInclude').value), exclude: splitGlobs($('#fExclude').value),
       schedule: sc, runIfMissed: $('#fMissed').checked,

@@ -350,7 +350,7 @@ async function pump() {
     let exec = { copied: 0, deleted: 0, bytes: 0, recycled: 0, foldersCreated: 0, foldersDeleted: 0, errors: [], skipped: [], stopped: stopFlag };
     if (!next.dryRun && !stopFlag) {
       current.phase = 'run';
-      exec = stored.driveApi ? await drive.executeDrive(job, plan.actions, dopts) : await sync.execute(job, plan.actions, opts);
+      exec = stored.driveApi ? await drive.executeDrive(job, plan.actions, dopts) : await sync.execute(job, plan.actions, { ...opts, folderMeta: plan.folderMeta });
     }
     if (plan.mirrorSkipped) logLine(`WARNING ${job.name}: ${plan.mirrorSkipped}`);
     summary = {
