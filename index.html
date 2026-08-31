@@ -129,6 +129,9 @@
   .runtop .grow { flex: 1; }
   .rundisk { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .runtop button { min-height: 40px; }
+  .pausechoice { display: inline-flex; align-items: center; gap: 8px; }
+  .pausechoice .runlbl { color: var(--muted); font-size: 14px; }
+  .runtop button.ghost { min-height: 40px; background: transparent; border-color: transparent; color: var(--muted); }
   .runpaths { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; align-items: baseline; }
   .runlbl { color: var(--faint); font-size: 13px; }
   /* Full paths, wrapped like Karen's window — never ellipsized: during a run you need to
@@ -235,6 +238,7 @@
   .rtabs button.active { border-color: var(--accent); color: var(--accent); }
   .oprow .rel { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .oprow .sz { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .oprow .rsn { flex: none; color: var(--muted); font-size: 12px; font-style: italic; white-space: nowrap; }
   /* Tap a cropped row to expand it to the full path/error (tap again to collapse);
      the text is ordinary selectable text, so it can be copied either way. The load-more
      sentinel and the nothing-to-do placeholder don't expand, so no pointer on those. */
@@ -384,6 +388,16 @@
       <span id="runPhase" class="runphase"></span>
       <span class="grow"></span>
       <span id="runDisk" class="rundisk"></span>
+      <!-- Per-run pause (Karen's "Resume Job"): the "finish current file vs pause now" choice is an
+           inline expander, not a modal (the panel is modal-free). -->
+      <button id="runPause">⏸ Pause</button>
+      <span id="runPauseChoice" class="pausechoice" hidden>
+        <span class="runlbl">Pause</span>
+        <button id="runPauseAfter">after this file</button>
+        <button id="runPauseNow">now</button>
+        <button id="runPauseCancel" class="ghost" aria-label="Cancel">✕</button>
+      </span>
+      <button id="runResume" hidden>▶ Resume</button>
       <button id="runStopAll" class="danger" hidden>Stop all</button>
       <button id="runStop" class="danger">Stop</button>
     </div>

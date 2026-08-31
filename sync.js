@@ -463,6 +463,7 @@ async function plan(job, opts = {}) {
     const siblings = followLnk ? new Set(entries.map(e => e.name.toLowerCase())) : null;
     for (const ent of entries) {
       if (stop()) return;
+      if (opts.waitIfPaused) { await opts.waitIfPaused(); if (stop()) return; } // pause parks the source scan too
       const rel = relDir ? relDir + '/' + ent.name : ent.name;
       if (ent.isDirectory()) {
         if (virtual) viaShortcut.add(rel.toLowerCase());
@@ -503,6 +504,7 @@ async function plan(job, opts = {}) {
       catch (e) { if (relDir) out.errors.push({ path: relDir, error: e.message }); return; }
       for (const ent of entries) {
         if (stop()) return;
+        if (opts.waitIfPaused) { await opts.waitIfPaused(); if (stop()) return; } // pause parks the mirror scan too
         const rel = relDir ? relDir + '/' + ent.name : ent.name;
         progD(rel);
         // Skip-pattern protection: an excluded dest entry (and everything under an
@@ -579,6 +581,10 @@ async function execute(job, actions, opts = {}) {
   let done = 0;
   for (const a of actions) {
     if (opts.shouldStop && opts.shouldStop()) { res.stopped = true; break; }
+    // Per-run pause: park between files while paused. A local copyFile isn't interruptible
+    // mid-file, so "pause now" effectively lands at the next boundary here (local copies are
+    // near-instant); the Drive engine aborts mid-download for a true "pause now".
+    if (opts.waitIfPaused) { await opts.waitIfPaused(); if (opts.shouldStop && opts.shouldStop()) { res.stopped = true; break; } }
     const to = path.join(dst, a.rel);
     try {
       if (a.op === 'copy') {

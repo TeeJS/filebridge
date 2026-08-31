@@ -217,6 +217,24 @@ let current = null;      // { id, name, dryRun, trigger, phase, progress, starte
 const queue = [];        // [{ id, dryRun, trigger }]
 const lastResults = {};  // id -> summary of last run/preview (in-memory; full action list)
 let stopFlag = false;
+// Per-run pause (Karen's "Resume Job"): suspends the ACTIVE run in place and continues from the
+// exact same spot on resume — distinct from Stop (cancels the run) and cfg.paused (blocks the
+// scheduler). The engine loops await waitIfPaused() between files; "pause now" also aborts the
+// in-flight Drive download (shouldPauseNow) and the loop redoes that one file after resume.
+let runPaused = false;   // pause requested / in effect for the current run
+let pauseNow = false;    // "pause now" — abort the in-flight file rather than finish it first
+let pauseWaiters = [];   // resolve fns for engine loops parked in waitIfPaused()
+function waitIfPaused() {
+  if (!runPaused) return Promise.resolve();
+  if (current) current.pausedActive = true; // actually parked now (vs still finishing the current file)
+  return new Promise(resolve => pauseWaiters.push(resolve));
+}
+function wakePauseWaiters() { const ws = pauseWaiters; pauseWaiters = []; for (const r of ws) r(); }
+function clearPause() { runPaused = false; pauseNow = false; wakePauseWaiters(); }
+// pump() claims `current` only AFTER an await (drive.folderName) in the Drive-API branch, so a
+// re-entrant pump() during that window could start a SECOND concurrent run. This synchronous latch
+// claims the run slot the moment pump() commits to a job, closing that race.
+let pumpStarting = false;
 
 const busy = id => (current && current.id === id) || queue.some(q => q.id === id);
 
@@ -228,15 +246,18 @@ function enqueue(id, dryRun, trigger) {
 }
 
 async function pump() {
-  if (current || !queue.length) return;
+  if (current || pumpStarting || !queue.length) return;
   const next = queue.shift();
   const cfg = loadCfg();
   const stored = (cfg.jobs || []).find(j => j.id === next.id);
-  if (!stored) { pump(); return; }
+  if (!stored) { pump(); return; } // skip path re-pumps BEFORE claiming the slot — keep the latch off here
+  pumpStarting = true; // slot claimed synchronously; released in failRun and in the run's finally
   stopFlag = false;
+  runPaused = false; pauseNow = false; pauseWaiters = []; // fresh run starts un-paused
   // Refuse this run with a clear fatal result. Also records lastRun (for real runs), or
   // the scheduler would see the job still due and retry (and beep) every 30 seconds.
   const failRun = msg => {
+    pumpStarting = false; // release the slot before re-pumping the queue
     lastResults[stored.id] = { at: new Date().toISOString(), ms: 0, ok: false, dryRun: next.dryRun, trigger: next.trigger, fatal: msg, errors: [], errorCount: 1, actions: [], kind: stored.kind === 'web' ? 'web' : undefined, webDownloaded: [], wouldDownload: [], skippedSeen: 0, collectionsVisited: 0, bytes: 0 };
     saveResult(stored.id, lastResults[stored.id]);
     logLine(`${next.dryRun ? 'preview' : 'run'} ${stored.name} (${next.trigger}): FAILED — ${msg}`);
@@ -310,7 +331,7 @@ async function pump() {
   // Guarded: a filter-resolution failure becomes a clean per-job failure, never an escaped
   // rejection that would jam the queue and retry every tick.
   if (stored.kind !== 'web') { try { resolveFilters(job); } catch (e) { failRun('filter groups could not be resolved: ' + e.message); return; } }
-  current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, tally: { copy: 0, same: 0, filtered: 0 }, disk: null, startedAt: Date.now() };
+  current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, tally: { copy: 0, same: 0, filtered: 0 }, paused: false, pausedActive: false, pauseMode: null, disk: null, startedAt: Date.now() };
   const t0 = Date.now();
   diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); // async — non-blocking
   // Live free space: refresh the destination's free/total every few seconds so a long run's
@@ -332,6 +353,8 @@ async function pump() {
   const opts = {
     resolveShortcut,
     shouldStop: () => stopFlag,
+    waitIfPaused,                       // engine loops park here between files while paused
+    shouldPauseNow: () => pauseNow,     // "pause now" — abort the in-flight Drive download
     onProgress: p => {
       if (!current) return;
       // Running scan tally (up-to-date · copy · filtered, climbing live). Count each file's
@@ -421,7 +444,7 @@ async function pump() {
     opts.collectUnchanged = !next.dryRun && cats.uptodate;
     opts.collectFiltered = !next.dryRun && cats.exclusions;
     const dopts = stored.driveApi
-      ? { getToken: driveToken, onProgress: opts.onProgress, shouldStop: opts.shouldStop, trash, collectUnchanged: opts.collectUnchanged, collectFiltered: opts.collectFiltered }
+      ? { getToken: driveToken, onProgress: opts.onProgress, shouldStop: opts.shouldStop, waitIfPaused: opts.waitIfPaused, shouldPauseNow: opts.shouldPauseNow, trash, collectUnchanged: opts.collectUnchanged, collectFiltered: opts.collectFiltered }
       : null;
     plan = stored.driveApi ? await drive.planDrive(job, dopts) : await sync.plan(job, opts);
     const copies = plan.actions.filter(a => a.op === 'copy').length;
@@ -455,7 +478,9 @@ async function pump() {
       // Full action list, uncapped — a preview must show EXACTLY what a real run would touch,
       // no arbitrary truncation. ponytail: held whole in memory (~100 B/entry); a multi-million
       // -file job could cost real RAM — page it out to a temp file if that ever bites.
-      actions: plan.actions.map(a => ({ op: a.op, rel: a.rel, size: a.size })),
+      // reason = WHY each file is copied (new file / source newer / time differs / size differs /
+      // content differs) — surfaced per row in the result detail so a copy always explains itself.
+      actions: plan.actions.map(a => ({ op: a.op, rel: a.rel, size: a.size, reason: a.reason })),
     };
   } catch (e) {
     summary = { at: new Date().toISOString(), ms: Date.now() - t0, ok: false, dryRun: next.dryRun, trigger: next.trigger, fatal: e.message, errors: [], errorCount: 1, actions: [], kind: stored.kind === 'web' ? 'web' : undefined, webDownloaded: [], wouldDownload: [], skippedSeen: 0, collectionsVisited: 0, bytes: 0 };
@@ -501,6 +526,8 @@ async function pump() {
   } finally {
     clearInterval(diskTimer);
     current = null;
+    pumpStarting = false; // release the run slot so the next queued job can start
+    clearPause(); // never let a pause flag linger past the run it belonged to
     pump();
   }
 }
@@ -855,7 +882,29 @@ exports.handle = async function handle(action, ctx) {
   if (action === 'stop') {
     if (!current && !queue.length) return { ok: false, error: 'nothing is running' };
     if (body.all && queue.length) { queue.length = 0; logLine('stop all: cleared the run queue'); }
-    if (current) { stopFlag = true; logLine(`stop requested: ${current.name}`); }
+    // Wake a paused run so its loop unblocks, sees stopFlag, and ends (Stop cancels a pause too).
+    if (current) { stopFlag = true; clearPause(); if (current) { current.paused = false; current.pausedActive = false; current.pauseMode = null; } logLine(`stop requested: ${current.name}`); }
+    return { ok: true };
+  }
+
+  // Per-run pause/resume (Karen's "Resume Job"). pauseRun {mode:'afterFile'|'now'} suspends the
+  // active run; resumeRun continues from the same spot. Web-drop jobs run their own engine and
+  // aren't pausable here.
+  if (action === 'pauseRun') {
+    if (!current) return { ok: false, error: 'no job is running' };
+    if (current.kind === 'web') return { ok: false, error: 'web-drop jobs can\'t be paused mid-run — use Stop' };
+    runPaused = true;
+    pauseNow = body.mode === 'now';
+    current.paused = true;
+    current.pauseMode = pauseNow ? 'now' : 'afterFile';
+    logLine(`pause requested (${current.pauseMode}): ${current.name}`);
+    return { ok: true };
+  }
+  if (action === 'resumeRun') {
+    if (!current || !runPaused) return { ok: false, error: 'no paused job to resume' };
+    current.paused = false; current.pausedActive = false; current.pauseMode = null;
+    clearPause();
+    logLine(`resume: ${current.name}`);
     return { ok: true };
   }
 
@@ -977,6 +1026,7 @@ exports._resolveFilters = resolveFilters; // exposed for tests
 exports._shutdown = function () {
   clearInterval(timer);
   stopFlag = true;
+  clearPause(); // wake a run parked in waitIfPaused so it can see stopFlag and unwind on shutdown
   for (const w of Object.values(loginWins)) { try { if (!w.isDestroyed()) w.destroy(); } catch {} }
   if (jobWin && !jobWin.isDestroyed()) { try { jobWin.destroy(); } catch {} }
   jobWin = null;

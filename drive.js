@@ -37,14 +37,15 @@ const EXPORT_MAP = {
 };
 
 function sanitizeName(name) {
-  // Google Drive for Desktop on Windows renders a "/" in a Drive name (legal there, illegal on
-  // Windows) as a SINGLE SPACE — "Star Wars Blasters/Weapons" -> "Star Wars Blasters Weapons".
-  // FileBridge used to map "/" to "_", so it never matched the mount-made copies and re-downloaded
-  // whole trees into duplicate "..._Weapons" folders. Convert slash/backslash to space FIRST to
-  // match the desktop client; the trailing replace then only touches the rarer illegal punctuation.
+  // Match Google Drive for Desktop on Windows: EVERY Windows-illegal character (< > : " / \ | ? *
+  // and control chars) that is legal in a Drive name is rendered locally as a SINGLE SPACE — e.g.
+  // "Star Wars Blasters/Weapons" -> "Star Wars Blasters Weapons", and "1:6 Scale" -> "1 6 Scale".
+  // FileBridge used to map these to "_", so it never matched the mount-made copies and re-downloaded
+  // whole trees into duplicate folders. (Web docs describe an underscore, but that's the browser
+  // "Download" zip path; the desktop mount uses a space — confirmed by the user's own folders and
+  // by re-runs reporting them "unchanged" once we matched with a space.)
   const s = String(name || '')
-    .replace(/[\/\\]/g, ' ')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim();
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').replace(/[. ]+$/g, '').trim();
   return s || '_';
 }
 
@@ -164,10 +165,10 @@ async function listTree(job, deps) {
       const an = sanitizeName(a.name).toLowerCase(), bn = sanitizeName(b.name).toLowerCase();
       if (an !== bn) return an < bn ? -1 : 1;
       // Same on-disk name (a collision): the winner must be fixed, not decided by Drive's order.
-      // Prefer the name that needs NO slash substitution (it already matches the desktop-client
-      // copy on disk), then a folder over a same-named file (keep the whole subtree, not one file),
-      // then the permanent Drive id as the final tie-break.
-      const asl = /[\/\\]/.test(a.name) ? 1 : 0, bsl = /[\/\\]/.test(b.name) ? 1 : 0;
+      // Prefer the name that needs NO illegal-char substitution (it already matches the
+      // desktop-client copy on disk), then a folder over a same-named file (keep the whole subtree,
+      // not one file), then the permanent Drive id as the final tie-break.
+      const asl = /[<>:"/\\|?*]/.test(a.name) ? 1 : 0, bsl = /[<>:"/\\|?*]/.test(b.name) ? 1 : 0;
       if (asl !== bsl) return asl - bsl;
       const af = a.mimeType === FOLDER ? 0 : 1, bf = b.mimeType === FOLDER ? 0 : 1;
       if (af !== bf) return af - bf;
@@ -177,6 +178,7 @@ async function listTree(job, deps) {
     const seenNames = new Set();
     for (const k of kids) {
       if (deps.shouldStop && deps.shouldStop()) return;
+      if (deps.waitIfPaused) { await deps.waitIfPaused(); if (deps.shouldStop && deps.shouldStop()) return; } // pause parks the Drive listing too
       let name = sanitizeName(k.name), mime = k.mimeType, id = k.id;
       let size = k.size, md5 = k.md5Checksum, mtime = k.modifiedTime;
       const lnkRel = relDir ? relDir + '/' + name : name;
@@ -264,6 +266,7 @@ async function planDrive(job, deps) {
 
   for (const f of tree.files) {
     if (stop()) break;
+    if (deps.waitIfPaused) { await deps.waitIfPaused(); if (stop()) break; } // pause parks the compare phase too
     remote.add(f.rel.toLowerCase());
     out.scanned++;
     prog(f.rel);
@@ -361,7 +364,11 @@ async function downloadTo(deps, driveId, dest, exportMime, onBytes) {
   // couldn't take effect until the whole file finished (checked only between files). Poll the
   // stop flag and abort the fetch/stream so Stop lands within ~200ms, mid-file.
   const ac = new AbortController();
-  const poll = setInterval(() => { if (deps.shouldStop && deps.shouldStop()) ac.abort(); }, 200);
+  let pausedAbort = false; // "pause now" aborted this download (vs Stop) — retry the file after resume
+  const poll = setInterval(() => {
+    if (deps.shouldStop && deps.shouldStop()) ac.abort();
+    else if (deps.shouldPauseNow && deps.shouldPauseNow()) { pausedAbort = true; ac.abort(); }
+  }, 200);
   if (deps.shouldStop && deps.shouldStop()) ac.abort();
   try {
     const res = await f(url, { headers: { Authorization: 'Bearer ' + token }, signal: ac.signal });
@@ -378,6 +385,7 @@ async function downloadTo(deps, driveId, dest, exportMime, onBytes) {
     const counter = new Transform({ transform(chunk, enc, cb) { wrote += chunk.length; if (onBytes) onBytes(wrote); cb(null, chunk); } });
     await pipeline(res.body, counter, fs.createWriteStream(dest), { signal: ac.signal });
   } catch (e) {
+    if (pausedAbort) throw new Error('paused');           // executeDrive waits for resume, then retries this file
     if (ac.signal.aborted || e.name === 'AbortError') throw new Error('stopped'); // executeDrive maps this to a clean stop
     throw e;
   } finally {
@@ -398,8 +406,12 @@ async function executeDrive(job, actions, deps) {
   const total = copies.length + dels.length;
   let done = 0;
   const prog = a => { done++; if (deps.onProgress) deps.onProgress({ phase: 'run', done, total, op: a.op, rel: a.rel, reason: a.reason, bytes: res.bytes }); };
-  for (const a of copies) {
+  for (let ci = 0; ci < copies.length; ci++) {
+    const a = copies[ci];
     if (deps.shouldStop && deps.shouldStop()) { res.stopped = true; break; }
+    // Park here between files while paused ("finish current file, then pause"). A stop can arrive
+    // during the pause, so re-check after waking.
+    if (deps.waitIfPaused) { await deps.waitIfPaused(); if (deps.shouldStop && deps.shouldStop()) { res.stopped = true; break; } }
     const to = path.join(dst, a.rel);
     const tmp = to + '.~fsync-dl';
     try {
@@ -444,17 +456,30 @@ async function executeDrive(job, actions, deps) {
       res.copied++; res.bytes += wrote;
     } catch (e) {
       try { await fsp.rm(tmp, { force: true }); } catch {}
+      if (e.message === 'paused') {
+        // "Pause now" aborted this file mid-download; the old copy is intact (restore-first + swap).
+        // Wait for resume, then redo THIS file so nothing is silently skipped.
+        if (deps.waitIfPaused) await deps.waitIfPaused();
+        if (deps.shouldStop && deps.shouldStop()) { res.stopped = true; break; }
+        ci--; continue; // retry the same file; don't count this aborted attempt as processed
+      }
       if (e.message === 'stopped') { res.stopped = true; break; }
       res.errors.push({ path: a.rel, error: e.message });
     }
     prog(a);
   }
   if (dels.length && !res.stopped) {
-    const d = await sync.execute(job, dels, { trash: deps.trash, shouldStop: deps.shouldStop, onProgress: deps.onProgress ? p => deps.onProgress({ ...p, done: done + p.done, total }) : undefined });
-    res.deleted = d.deleted; res.recycled = d.recycled; res.foldersDeleted = d.foldersDeleted;
-    res.errors.push(...d.errors);
-    res.warnings.push(...(d.warnings || []));
-    if (d.stopped) res.stopped = true;
+    // Honor a pause requested at the copy->delete boundary BEFORE any destructive delete runs —
+    // pausing a mirror job to inspect before deletions is exactly why someone would pause here.
+    if (deps.waitIfPaused) { await deps.waitIfPaused(); if (deps.shouldStop && deps.shouldStop()) res.stopped = true; }
+    if (!res.stopped) {
+      // Forward waitIfPaused so the deletion pass parks between files too (sync.execute's own gate).
+      const d = await sync.execute(job, dels, { trash: deps.trash, shouldStop: deps.shouldStop, waitIfPaused: deps.waitIfPaused, onProgress: deps.onProgress ? p => deps.onProgress({ ...p, done: done + p.done, total }) : undefined });
+      res.deleted = d.deleted; res.recycled = d.recycled; res.foldersDeleted = d.foldersDeleted;
+      res.errors.push(...d.errors);
+      res.warnings.push(...(d.warnings || []));
+      if (d.stopped) res.stopped = true;
+    }
   }
   return res;
 }

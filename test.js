@@ -910,6 +910,43 @@ async function run(j) {
       assert.deepEqual(cdp.actions.map(a => a.rel), ['Guns Ammo/from-space.txt'],
         'the no-slash original wins the collision, and the winner never flips with listing order (' + order.join(',') + ')');
     }
+    // per-run pause "pause now": a download aborted mid-file (throws 'paused') waits for resume
+    // and RETRIES the same file — it is neither skipped nor counted as an error.
+    reset(); fs.mkdirSync(DST, { recursive: true });
+    let dlAttempts = 0, resumeWaits = 0;
+    const pauseDl = (id, to) => { dlAttempts++; if (dlAttempts === 1) return Promise.reject(new Error('paused')); fs.writeFileSync(to, 'X'); return Promise.resolve(); };
+    const pde = await drive.executeDrive(djob({}), [{ op: 'copy', rel: 'x.txt', size: 1, mtimeMs: T1ms, driveId: 'd1' }], {
+      downloadTo: pauseDl, shouldStop: () => false, waitIfPaused: () => { resumeWaits++; return Promise.resolve(); },
+    });
+    assert.equal(dlAttempts, 2, 'a pause-now abort retries the same file');
+    assert.equal(pde.copied, 1, 'the retried file is copied');
+    assert.equal(pde.errors.length, 0, 'a pause abort is not an error');
+    assert(resumeWaits >= 1, 'the loop waited for resume before retrying');
+    assert(exists(DST, 'x.txt'), 'the file lands after resume');
+    // a stop DURING the resume wait ends the run cleanly (no retry loop)
+    reset(); fs.mkdirSync(DST, { recursive: true });
+    let stopAfter = false;
+    const stopDl = () => Promise.reject(new Error('paused'));
+    const sde = await drive.executeDrive(djob({}), [{ op: 'copy', rel: 'y.txt', size: 1, mtimeMs: T1ms, driveId: 'd2' }], {
+      downloadTo: stopDl, shouldStop: () => stopAfter, waitIfPaused: () => { stopAfter = true; return Promise.resolve(); },
+    });
+    assert.equal(sde.stopped, true, 'Stop during a pause ends the run');
+    assert.equal(sde.copied, 0, 'nothing copied when stopped out of a pause');
+    // DATA SAFETY: a paused mirror job's destination deletions must NOT run while parked — the
+    // whole point of pausing a mirror job is to inspect before the destructive delete phase.
+    reset(); fs.mkdirSync(DST, { recursive: true });
+    fs.writeFileSync(path.join(DST, 'gone.txt'), 'x');
+    let releaseDel; const delGate = new Promise(r => releaseDel = r);
+    let delWaits = 0;
+    const delExecP = drive.executeDrive(djob({}), [{ op: 'del', rel: 'gone.txt' }], {
+      shouldStop: () => false, waitIfPaused: () => (delWaits++ === 0 ? delGate : Promise.resolve()),
+    });
+    await new Promise(r => setTimeout(r, 25));
+    assert(exists(DST, 'gone.txt'), 'the mirror deletion waits at the copy->delete boundary while paused');
+    releaseDel();
+    const delExec = await delExecP;
+    assert(!exists(DST, 'gone.txt'), 'the deletion runs once resumed');
+    assert.equal(delExec.deleted, 1, 'the deletion is counted after resume');
     // newer-only reason matches the local engine's vocabulary
     reset();
     fake = makeFake({ root: [file('f1', 'a.txt', 'AAA')] }, contents);
@@ -990,8 +1027,8 @@ async function run(j) {
     de = await drive.executeDrive(djob({ exportNative: true }), dp.actions, deps(fake));
     assert.equal(de.copied, 0);
     assert(de.errors.some(e => /10 MB/.test(e.error)), 'export-too-large gives a readable error: ' + JSON.stringify(de.errors));
-    // sanitize: Drive names with characters Windows can't hold
-    assert.equal(drive.sanitizeName('Ren: der*?.zip'), 'Ren_ der__.zip');
+    // sanitize: Drive names with characters Windows can't hold -> a space each (Drive-for-Desktop parity)
+    assert.equal(drive.sanitizeName('Ren: der*?.zip'), 'Ren  der  .zip');
     assert.equal(drive.sanitizeName('dots...'), 'dots');
     assert.equal(manifest.oauth.scopes[0], 'https://www.googleapis.com/auth/drive.readonly', 'manifest asks for read-only Drive access');
     // Stop aborts an IN-FLIGHT download (not just between files): a never-ending stream is
@@ -1137,14 +1174,31 @@ async function run(j) {
   assert(collectOn.unchangedList.includes('keep.txt'), 'unchanged path collected when opted in');
   assert(collectOn.filteredList.includes('skip.tmp'), 'filtered path collected when opted in');
 
+  // ── per-run pause parks the local engine between files, then resumes ──
+  // waitIfPaused is awaited before each file; while it stays unresolved the loop is parked
+  // (nothing copied), and it finishes every file once resumed — a true suspend, not a cancel.
+  reset();
+  write(SRC, 'pa.txt', 'a'); write(SRC, 'pb.txt', 'b');
+  const pausePlan = await sync.plan(job());
+  let releaseRun; const runGate = new Promise(r => releaseRun = r);
+  let gateCalls = 0;
+  const runP = sync.execute(job(), pausePlan.actions, { waitIfPaused: () => (gateCalls++ === 0 ? runGate : Promise.resolve()) });
+  await new Promise(r => setTimeout(r, 25)); // let the loop reach the first park
+  assert(!exists(DST, 'pa.txt') && !exists(DST, 'pb.txt'), 'the run parks before copying while paused');
+  releaseRun();
+  const pauseExec = await runP;
+  assert(exists(DST, 'pa.txt') && exists(DST, 'pb.txt'), 'the run finishes every file after resume');
+  assert.equal(pauseExec.copied, 2, 'nothing is skipped by the pause');
+
   // ── Drive name sanitization must match Google Drive for Desktop (Windows) ──
   // A "/" is legal in a Drive name but illegal on Windows; the desktop client renders it as a
   // SPACE. Mapping it to "_" here made FileBridge miss the mount-made copies and re-download whole
   // trees into duplicate "..._Weapons" folders. Slash/backslash -> space; other illegal -> "_".
   assert.equal(drive.sanitizeName('Star Wars Blasters/Weapons'), 'Star Wars Blasters Weapons', 'forward slash -> space');
-  assert.equal(drive.sanitizeName('Halo/Bionicle Mashups'), 'Halo Bionicle Mashups', 'the other real dup case');
-  assert.equal(drive.sanitizeName('a\\b'), 'a b', 'backslash -> space too');
-  assert.equal(drive.sanitizeName('a:b?c*d'), 'a_b_c_d', 'the rarer illegal punctuation still -> _');
+  assert.equal(drive.sanitizeName('Halo/Bionicle Mashups'), 'Halo Bionicle Mashups', 'the other real slash dup case');
+  assert.equal(drive.sanitizeName('1:6 Scale'), '1 6 Scale', 'colon -> space (the real dup case that motivated the full fix)');
+  assert.equal(drive.sanitizeName('a\\b'), 'a b', 'backslash -> space');
+  assert.equal(drive.sanitizeName('a:b?c*d'), 'a b c d', 'EVERY illegal char -> space, not "_" (matches Drive for Desktop)');
   assert.equal(drive.sanitizeName('trailing/'), 'trailing', 'a trailing slash-space is trimmed, not left dangling');
   assert.equal(drive.sanitizeName('  '), '_', 'an all-illegal/blank name falls back to _');
 

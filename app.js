@@ -969,8 +969,12 @@ function renderMoreActs() {
   let html = '';
   for (let i = resShown; i < end; i++) {
     const a = resActs[i];
+    // WHY this file copied (new file / source newer / size differs / …) — the "all files" reason
+    // (compare mode = copy everything) carries no per-file signal, so it's left off.
+    const rsn = a.op === 'copy' && a.reason && a.reason !== 'all files'
+      ? '<span class="rsn">' + esc(a.reason) + '</span>' : '';
     html += '<div class="oprow"><span class="op ' + (a.op === 'copy' ? 'copy' : 'del') + '">' +
-      (a.op === 'copy' ? 'copy' : 'delete') + '</span><span class="rel">' + esc(a.rel) + '</span>' +
+      (a.op === 'copy' ? 'copy' : 'delete') + '</span><span class="rel">' + esc(a.rel) + '</span>' + rsn +
       (a.size != null ? '<span class="sz">' + fmtBytes(a.size) + '</span>' : '') + '</div>';
   }
   resShown = end;
@@ -1274,8 +1278,9 @@ async function poll() {
 // during both the scan and the copy phases; counts are secondary.
 function renderRunbar() {
   const bar = $('#runbar');
-  if (!current) { bar.hidden = true; return; }
+  if (!current) { bar.hidden = true; pauseChoosing = false; pausePending = false; return; } // don't leak pause UI into the next run
   bar.hidden = false;
+  renderPauseControls();
   $('#runStopAll').hidden = !queueIds.length; // queued jobs behind this one? offer batch abort
   if (current.kind === 'web') {
     const p = current.progress || {};
@@ -1362,11 +1367,49 @@ function renderRunbar() {
     if (ec) parts.push('<b style="color:var(--red)">' + ec.toLocaleString() + '</b> error' + (ec === 1 ? '' : 's'));
     $('#runCounts').innerHTML = parts.join(' · ');
   }
+  // Paused overrides the phase line (the progress freezes at the last file until Resume).
+  if (current.paused) {
+    $('#runPhase').textContent = current.pausedActive
+      ? 'Paused — press Resume to continue'
+      : (current.pauseMode === 'now' ? 'Pausing now…' : 'Pausing — finishing the current file…');
+  }
   const d = current.disk;
   $('#runDisk').textContent = d ? fmtBytes(d.free) + ' free of ' + fmtBytes(d.total) : '';
 }
 $('#runStop').addEventListener('click', () => api('stop', {}));
 $('#runStopAll').addEventListener('click', () => api('stop', { all: true }));
+
+// ── per-run Pause / Resume (Karen's "Resume Job") ─────────────────────────────
+// The "finish current file vs pause now" choice is an inline expander in the run band, not a
+// modal (the panel is modal-free). pauseChoosing tracks the expander; the run's paused state
+// comes from the server (current.paused / current.pausedActive).
+let pauseChoosing = false;
+let pausePending = false; // committed a pause locally; hide Pause until the poll reports current.paused
+function renderPauseControls() {
+  const web = current && current.kind === 'web';       // web-drop jobs run their own engine — no pause
+  const paused = !!(current && current.paused);         // pause requested / in effect
+  const active = !!(current && current.pausedActive);   // actually parked at the gate (file finished)
+  if (paused) pausePending = false;                     // the server has caught up
+  $('#runResume').hidden = !active;                     // Resume only once TRULY parked (else it silently cancels)
+  $('#runPause').hidden = web || paused || pauseChoosing || pausePending;
+  $('#runPauseChoice').hidden = web || paused || !pauseChoosing;
+}
+$('#runPause').addEventListener('click', () => { pauseChoosing = true; renderPauseControls(); });
+$('#runPauseCancel').addEventListener('click', () => { pauseChoosing = false; renderPauseControls(); });
+$('#runPauseAfter').addEventListener('click', async () => {
+  pauseChoosing = false; pausePending = true; renderPauseControls();
+  const r = await api('pauseRun', { mode: 'afterFile' });
+  if (!r.ok) { pausePending = false; renderPauseControls(); msg(r.error || 'could not pause', 'bad'); }
+});
+$('#runPauseNow').addEventListener('click', async () => {
+  pauseChoosing = false; pausePending = true; renderPauseControls();
+  const r = await api('pauseRun', { mode: 'now' });
+  if (!r.ok) { pausePending = false; renderPauseControls(); msg(r.error || 'could not pause', 'bad'); }
+});
+$('#runResume').addEventListener('click', async () => {
+  const r = await api('resumeRun', {});
+  if (!r.ok) msg(r.error || 'could not resume', 'bad');
+});
 
 // ── last-run results band (Karen's auto-shown Last Run panel) ─────────────────
 // Shows the newest finished (non-preview) run's numbers on the main view. Dismiss hides it
