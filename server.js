@@ -310,7 +310,7 @@ async function pump() {
   // Guarded: a filter-resolution failure becomes a clean per-job failure, never an escaped
   // rejection that would jam the queue and retry every tick.
   if (stored.kind !== 'web') { try { resolveFilters(job); } catch (e) { failRun('filter groups could not be resolved: ' + e.message); return; } }
-  current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, disk: null, startedAt: Date.now() };
+  current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, tally: { copy: 0, same: 0, filtered: 0 }, disk: null, startedAt: Date.now() };
   const t0 = Date.now();
   diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); // async — non-blocking
   // Live free space: refresh the destination's free/total every few seconds so a long run's
@@ -334,6 +334,16 @@ async function pump() {
     shouldStop: () => stopFlag,
     onProgress: p => {
       if (!current) return;
+      // Running scan tally (up-to-date · copy · filtered, climbing live). Count each file's
+      // verdict ONCE — off the op the event ARRIVED with, before the sticky carry-forward
+      // below re-stamps blank "examining" events with the previous verdict (which would
+      // otherwise count every file many times over).
+      const arrivedOp = p.op;
+      if (p.phase === 'scan' && arrivedOp && current.tally) {
+        if (arrivedOp === 'copy') current.tally.copy++;
+        else if (arrivedOp === 'same') current.tally.same++;
+        else if (arrivedOp === 'filtered') current.tally.filtered++;
+      }
       // The scan emits "examining" (no verdict) then the verdict, and the next file's
       // "examining" follows within microseconds — a 1 s status snapshot would almost
       // always catch the blank instant and the verdict chip would never be seen.

@@ -1320,7 +1320,11 @@ function renderRunbar() {
       $('#runOp').textContent = deleting ? 'delete' : 'copy';
       $('#runReason').textContent = p.reason ? '(' + p.reason + ')' : '';
       const rate = transferRate(current.startedAt, p.bytes || 0);
-      $('#runCounts').innerHTML = 'Copied <b>' + fmtBytes(p.bytes || 0) + '</b>' + (rate > 0 ? ' · <b>' + fmtBytes(rate) + '/s</b>' : '');
+      // Carry the scan's up-to-date count into the copy phase — for a Drive job the compare
+      // is a sub-second burst, so this is where "340 recognized as up-to-date" stays visible.
+      const st = current.tally || {};
+      $('#runCounts').innerHTML = 'Copied <b>' + fmtBytes(p.bytes || 0) + '</b>' + (rate > 0 ? ' · <b>' + fmtBytes(rate) + '/s</b>' : '')
+        + (st.same ? ' · <b style="color:var(--green)">' + st.same.toLocaleString() + '</b> up-to-date' : '');
     } else {
       // Scan is done but the first copy hasn't completed yet — don't show a stale verdict.
       $('#runPhase').textContent = 'Copying — starting…';
@@ -1346,9 +1350,17 @@ function renderRunbar() {
     // Show the reason for a copy, and the actual error text the moment an error occurs.
     $('#runReason').textContent = p.op === 'error' ? (p.reason ? String(p.reason).slice(0, 90) : '')
       : (p.op === 'copy' && p.reason && p.reason !== 'all files' ? '(' + p.reason + ')' : '');
-    // Running error tally so problems are visible in real time, not only at the end.
+    // Running verdict tally, climbing live as the scan decides each file (Karen's status
+    // counts): up-to-date · copy · filtered — plus errors. Answers "is it recognizing my
+    // files as up-to-date, or re-copying them?" without needing to catch sub-second chips.
+    const t = current.tally || { copy: 0, same: 0, filtered: 0 };
     const ec = p.errCount || 0;
-    $('#runCounts').innerHTML = ec ? '<b style="color:var(--red)">' + ec.toLocaleString() + '</b> error' + (ec === 1 ? '' : 's') + ' so far' : '';
+    const parts = [];
+    if (t.same) parts.push('<b style="color:var(--green)">' + t.same.toLocaleString() + '</b> up-to-date');
+    if (t.copy) parts.push('<b style="color:var(--blue)">' + t.copy.toLocaleString() + '</b> to copy');
+    if (t.filtered) parts.push('<b>' + t.filtered.toLocaleString() + '</b> filtered');
+    if (ec) parts.push('<b style="color:var(--red)">' + ec.toLocaleString() + '</b> error' + (ec === 1 ? '' : 's'));
+    $('#runCounts').innerHTML = parts.join(' · ');
   }
   const d = current.disk;
   $('#runDisk').textContent = d ? fmtBytes(d.free) + ' free of ' + fmtBytes(d.total) : '';
