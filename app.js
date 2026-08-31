@@ -127,7 +127,12 @@ function stHtml(j) {
       return st('c-work', (current.dryRun ? 'Previewing… ' : 'Fetching… ') + (p.webPhase || '') +
         (c.downloaded != null ? ' — ' + c.downloaded + ' downloaded' : ''));
     }
-    if (current.phase === 'scan' || current.phase === 'mirror') return st('c-work', (current.dryRun ? 'Previewing… ' : 'Scanning… ') + (p.scanned || 0) + ' files');
+    if (current.phase === 'scan' || current.phase === 'mirror') {
+      const ec = p.errCount || 0;
+      return st('c-work', (current.dryRun ? 'Previewing… ' : 'Scanning… ') +
+        (p.listing ? (p.foldersScanned || 0) + ' folders' : (p.scanned || 0) + ' files') +
+        (ec ? ' · ' + ec + ' errors' : ''));
+    }
     const pct = p.phase === 'run' && p.total ? Math.round(p.done / p.total * 100) + '%' : '…';
     return st('c-work', (p.phase === 'run' && p.op !== 'copy' ? 'Deleting ' : 'Copying ') + pct);
   }
@@ -849,7 +854,7 @@ async function openResult(id) {
         (d.foldersCreated && d.foldersDeleted ? ', ' : '') + (d.foldersDeleted ? d.foldersDeleted + ' deleted' : '') + ')' : '') + '</span>');
     if (d.filtered) parts.push('<span><b>' + d.filtered + '</b> filtered out</span>');
     if (d.mirrorProtected) parts.push('<span><b>' + d.mirrorProtected + '</b> skip-protected from deletion</span>');
-    if (d.skippedCount) parts.push('<span><b style="color:var(--amber)">' + d.skippedCount + '</b> Google placeholders skipped</span>');
+    if (d.skippedCount) parts.push('<span><b style="color:var(--amber)">' + d.skippedCount + '</b> skipped</span>');
     if (d.errorCount) parts.push('<span><b style="color:var(--red)">' + d.errorCount + '</b> errors</span>');
     if (d.stopped) parts.push('<span><b style="color:var(--red)">stopped early</b></span>');
   }
@@ -1217,14 +1222,23 @@ function renderRunbar() {
     $('#runFill').style.width = '100%';
     clearChip();
   } else {
-    $('#runPhase').textContent = (current.dryRun ? 'Previewing' : 'Scanning') + ' — ' + (p.scanned || 0).toLocaleString() + ' files examined';
+    // Folder scan OR Drive-API listing. During a Drive listing show folder+file progress
+    // (the tree walk precedes the file compare); otherwise the per-file examined count.
+    const lead = current.dryRun ? 'Previewing' : 'Scanning';
+    $('#runPhase').textContent = p.listing
+      ? lead + ' — listing Drive folders · ' + (p.foldersScanned || 0).toLocaleString() + ' folders, ' + (p.scanned || 0).toLocaleString() + ' files'
+      : lead + ' — ' + (p.scanned || 0).toLocaleString() + ' files examined';
     $('#runFill').style.width = '100%'; // indeterminate: full accent bar while scanning
-    // Live per-file verdict (Karen's status band): UP-TO-DATE / copy / filtered as the scan moves.
+    // Live per-item verdict (Karen's status band): up-to-date / copy / filtered / error as it moves.
     const chip = { same: ['same', 'up-to-date'], copy: ['copy', 'copy'], filtered: ['filtered', 'filtered'], error: ['del', 'error'] }[p.op];
     $('#runOp').className = 'runop ' + (chip ? chip[0] : '');
     $('#runOp').textContent = chip ? chip[1] : '';
-    $('#runReason').textContent = p.op === 'copy' && p.reason && p.reason !== 'all files' ? '(' + p.reason + ')' : '';
-    $('#runCounts').innerHTML = '';
+    // Show the reason for a copy, and the actual error text the moment an error occurs.
+    $('#runReason').textContent = p.op === 'error' ? (p.reason ? String(p.reason).slice(0, 90) : '')
+      : (p.op === 'copy' && p.reason && p.reason !== 'all files' ? '(' + p.reason + ')' : '');
+    // Running error tally so problems are visible in real time, not only at the end.
+    const ec = p.errCount || 0;
+    $('#runCounts').innerHTML = ec ? '<b style="color:var(--red)">' + ec.toLocaleString() + '</b> error' + (ec === 1 ? '' : 's') + ' so far' : '';
   }
   const d = current.disk;
   $('#runDisk').textContent = d ? fmtBytes(d.free) + ' free of ' + fmtBytes(d.total) : '';
@@ -1267,7 +1281,7 @@ function renderLastBand() {
         (best.foldersCreated && best.foldersDeleted ? ', ' : '') + (best.foldersDeleted ? n(best.foldersDeleted) + ' deleted' : '') + ')' : '') + '</span>' : '') +
     (best.filtered ? '<span><b>' + n(best.filtered) + '</b> filtered</span>' : '') +
     (best.deleted || best.recycled ? '<span><b>' + n(best.deleted) + '</b> deleted' + (best.recycled ? ' (' + n(best.recycled) + ' recycled)' : '') + '</span>' : '') +
-    (best.skippedCount ? '<span><b style="color:var(--amber)">' + n(best.skippedCount) + '</b> placeholders skipped</span>' : '') +
+    (best.skippedCount ? '<span><b style="color:var(--amber)">' + n(best.skippedCount) + '</b> skipped</span>' : '') +
     (best.errorCount ? '<span><b style="color:var(--red)">' + n(best.errorCount) + '</b> errors</span>' : '') +
     (best.stopped ? '<span style="color:var(--amber)">stopped early</span>' : '');
   const html =

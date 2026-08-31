@@ -749,12 +749,25 @@ async function run(j) {
     dp = await drive.planDrive(djob({ followShortcuts: true }), deps(fake));
     assert.deepEqual(dp.actions.map(a => a.rel), ['Linked/inner.txt'], 'follow on: target content under the SHORTCUT name');
     assert(dp.errors.some(e => /loop/.test(e.error)), 'shortcut loop back to the same folder is cut');
-    // duplicate names in one Drive folder: first wins, reported
+    // duplicate names in one Drive folder (DIFFERENT items): keep the first, report as a SKIP not an error
     fake = makeFake({ root: [file('f1', 'x.txt', 'AAA'), file('f3', 'x.txt', 'CC')] }, contents);
     dp = await drive.planDrive(djob({}), deps(fake));
     assert.equal(dp.actions.length, 1);
     assert.equal(dp.actions[0].driveId, 'f1');
-    assert(dp.errors.some(e => /duplicate/.test(e.error)));
+    assert.equal(dp.errors.length, 0, 'a same-name collision is a skip, not an error');
+    assert(dp.nativeSkipped.some(n => /already here/.test(n.note)), 'the collision is reported as a skip');
+    // the SAME file id listed twice (Drive multi-parent / shared-added quirk) is collapsed silently
+    fake = makeFake({ root: [file('f1', 'x.txt', 'AAA'), file('f1', 'x.txt', 'AAA')] }, contents);
+    dp = await drive.planDrive(djob({}), deps(fake));
+    assert.equal(dp.actions.length, 1, 'a doubly-listed same-id file counts once');
+    assert.equal(dp.errors.length, 0, 'no phantom duplicate error for a re-listed id');
+    assert(!dp.nativeSkipped.some(n => /already here/.test(n.note)), 'a re-listed id is not even a skip');
+    // the listing phase emits live progress (folders/errors) so the run bar shows motion
+    let sawListing = false, sawFolders = 0;
+    fake = makeFake({ root: [folder('s1', 'Sub'), file('f1', 'a.txt', 'AAA')], s1: [file('f2', 'b.txt', 'BB')] }, { f1: 'AAA', f2: 'BB' });
+    await drive.planDrive(djob({}), { ...deps(fake), onProgress: pr => { if (pr.listing) { sawListing = true; sawFolders = Math.max(sawFolders, pr.foldersScanned || 0); } } });
+    assert(sawListing, 'listing phase emits live progress');
+    assert(sawFolders >= 2, 'progress reports folders as they are walked');
     // failed download restores the previous good copy (safe replace)
     reset();
     fs.mkdirSync(DST, { recursive: true });
@@ -802,7 +815,8 @@ async function run(j) {
     fake = makeFake({ root: [folder('subA', 'Thing'), file('f1', 'Thing', 'AAA')], subA: [file('f3', 'in.txt', 'CC')] }, contents);
     dp = await drive.planDrive(djob({}), deps(fake));
     assert.deepEqual(dp.actions.map(a => a.rel), ['Thing/in.txt'], 'first listed wins the name');
-    assert(dp.errors.some(e => /duplicate/.test(e.error)));
+    assert.equal(dp.errors.length, 0, 'file/folder name clash is a skip, not an error');
+    assert(dp.nativeSkipped.some(n => /already here/.test(n.note)));
     // newer-only reason matches the local engine's vocabulary
     reset();
     fake = makeFake({ root: [file('f1', 'a.txt', 'AAA')] }, contents);
@@ -860,7 +874,7 @@ async function run(j) {
     fake = makeFake({ root: [gsheet, file('fb', 'Budget.xlsx', 'REALXLSX')] }, { 'export:gs1': 'XLSXBYTES' });
     dp = await drive.planDrive(djob({ exportNative: true }), deps(fake));
     assert.equal(dp.actions.filter(a => a.op === 'copy' && a.rel === 'Budget.xlsx').length, 1, 'only one action targets Budget.xlsx');
-    assert(dp.errors.some(e => /duplicate/.test(e.error)), 'the export-vs-real collision is reported');
+    assert(dp.nativeSkipped.some(n => /already here/.test(n.note)), 'the export-vs-real collision is reported as a skip');
     // a Sheet "Doc" and a Doc "Doc" do NOT collide (Doc.xlsx vs Doc.docx) — both export
     reset();
     fake = makeFake({ root: [{ id: 'gs2', name: 'Doc', mimeType: 'application/vnd.google-apps.spreadsheet', modifiedTime: T1 }, { id: 'gd2', name: 'Doc', mimeType: 'application/vnd.google-apps.document', modifiedTime: T1 }] },

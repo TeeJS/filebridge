@@ -125,6 +125,11 @@ async function listTree(job, deps) {
 
   async function walkFolder(folderId, relDir, chain) {
     if (deps.shouldStop && deps.shouldStop()) { out.stopped = true; return; }
+    // Live progress: a big tree's listing phase is long — report folders/files/errors AS
+    // THEY HAPPEN so the run bar shows real motion (and surfaces errors immediately) rather
+    // than a frozen "0 files examined" until the very end.
+    const tick = (op, rel, reason) => { if (deps.onProgress) deps.onProgress({ phase: 'scan', listing: true, foldersScanned: out.foldersScanned, scanned: out.files.length, errCount: out.errors.length, rel, op, reason }); };
+    const fail = (path, error) => { out.errors.push({ path, error }); tick('error', path, error); };
     let kids;
     try { kids = await listChildren(deps, folderId); }
     catch (e) {
@@ -132,10 +137,16 @@ async function listTree(job, deps) {
       // report a phantom error and (via the incomplete-listing guard) look scarier
       // than "the user pressed Stop".
       if (e.message === 'stopped') { out.stopped = true; return; }
-      out.errors.push({ path: relDir || '(root)', error: e.message }); return;
+      fail(relDir || '(root)', e.message); return;
     }
     out.foldersScanned++;
     if (!relDir) out.topCount = kids.length;
+    // Drive can list the same item twice in one folder — a file that's shared-and-added or
+    // multi-parented comes back once per relationship. Collapse exact-id repeats so a phantom
+    // second copy isn't reported as a name collision (this is the usual cause of a wall of
+    // "duplicate name" errors on shared Patreon-style folders that the local mount shows fine).
+    { const ids = new Set(); kids = kids.filter(k => ids.has(k.id) ? false : (ids.add(k.id), true)); }
+    tick(undefined, relDir || '(root)'); // announce this folder
     const seenNames = new Set();
     for (const k of kids) {
       if (deps.shouldStop && deps.shouldStop()) return;
@@ -145,10 +156,10 @@ async function listTree(job, deps) {
       if (mime === SHORTCUT) {
         if (!follow) { out.natives.push({ path: lnkRel, note: 'Drive shortcut — turn on Follow shortcuts to copy its target' }); continue; }
         const tid = k.shortcutDetails && k.shortcutDetails.targetId;
-        if (!tid) { out.errors.push({ path: lnkRel, error: 'shortcut has no target' }); continue; }
+        if (!tid) { fail(lnkRel, 'shortcut has no target'); continue; }
         let t;
         try { t = await fileMeta(deps, tid); }
-        catch (e) { out.errors.push({ path: lnkRel, error: 'shortcut target is unreachable: ' + e.message }); continue; }
+        catch (e) { fail(lnkRel, 'shortcut target is unreachable: ' + e.message); continue; }
         mime = t.mimeType; id = t.id; size = t.size; md5 = t.md5Checksum; mtime = t.modifiedTime;
         // keep the shortcut's own (sanitized) name — same rule as the .lnk expansion
       }
@@ -168,10 +179,13 @@ async function listTree(job, deps) {
       const dupKey = outName.toLowerCase();
       const rel = relDir ? relDir + '/' + outName : outName;
       if (mime === FOLDER && exc.length && sync.matches(exc, outName, rel)) { out.filteredDirs++; continue; }
-      if (seenNames.has(dupKey)) { out.errors.push({ path: rel, error: 'duplicate name in the same Drive folder — only the first was used' }); continue; }
+      // A genuine same-name-different-item collision (two DIFFERENT items that would land on
+      // one Windows path) is a SKIP, not an error — Windows can't hold both, so we keep the
+      // first, exactly as the local mount does. Reported amber, never counted as a failure.
+      if (seenNames.has(dupKey)) { out.natives.push({ path: rel, note: 'another item of this name is already here — kept the first (one Windows path can\'t hold two)' }); continue; }
       seenNames.add(dupKey);
       if (mime === FOLDER) {
-        if (chain.has(id)) { out.errors.push({ path: rel, error: 'shortcut loop skipped — folder already being visited' }); continue; }
+        if (chain.has(id)) { fail(rel, 'shortcut loop skipped — folder already being visited'); continue; }
         out.dirRels.add(rel.toLowerCase());
         if (sub) { const next = new Set(chain); next.add(id); await walkFolder(id, rel, next); }
         continue;
