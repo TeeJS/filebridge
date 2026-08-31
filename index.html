@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FileBridge</title>
+<style>
+  /* FileBridge panel app — full-screen VIEW navigation, no modals (1920×480 touch).
+     Three stable regions per view: 64px header / scrolling content / 72px footer.
+     Spacing scale 8/16/24/32; 48px touch targets; accent only on the primary action;
+     red reserved for destruction (mirror deletes, job delete). */
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel-2: #1c2128; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --faint: #6e7681;
+    --accent: #3ca4e3; --accent-ink: #06131a;
+    --green: #3fb950; --blue: #58a6ff; --red: #f85149; --amber: #d29922;
+    --mono: 'Cascadia Code', 'Cascadia Mono', Consolas, ui-monospace, monospace;
+    --sans: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body { margin: 0; color: var(--text); font-family: var(--sans); font-size: 15px;
+         line-height: 1.45; background: var(--bg); overflow: hidden; }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 6px; border: 3px solid var(--bg); }
+
+  .view { display: none; height: 100%; flex-direction: column; background: var(--bg); }
+  .view.active { display: flex; animation: slidein .18s ease; }
+  @keyframes slidein { from { transform: translateX(28px); opacity: .5; } to { transform: none; opacity: 1; } }
+
+  button { font: 600 15px var(--sans); cursor: pointer; border-radius: 8px; padding: 0 20px;
+           min-height: 48px; border: 1px solid var(--border); background: #21262d; color: var(--text);
+           transition: background .15s, border-color .15s, opacity .15s; white-space: nowrap; }
+  button:hover:not(:disabled) { background: #2a313a; border-color: #444c56; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button.danger { color: var(--red); border-color: #6e2b28; }
+  input[type=text], input[type=number], input[type=time], input[type=datetime-local] {
+    font: 400 17px var(--mono); padding: 0 14px; min-height: 48px; border-radius: 8px;
+    color: var(--text); background: var(--panel); border: 1px solid var(--border); }
+  input[type=datetime-local] { color-scheme: dark; }
+  input::placeholder { color: var(--faint); }
+  input:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { width: 24px; height: 24px; accent-color: var(--accent); flex: none; cursor: pointer; }
+  .chk { display: inline-flex; align-items: center; gap: 10px; font-size: 16px; color: var(--text);
+         cursor: pointer; white-space: nowrap; min-height: 48px; }
+
+  /* ══ Main view ══ */
+  .page-header { flex: none; display: flex; align-items: center; min-height: 64px; gap: 16px;
+                 padding: 0 32px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .page-header h1 { margin: 0; font: 600 24px var(--sans); white-space: nowrap; }
+  .logo { width: 32px; height: 32px; flex: none; display: grid; place-items: center;
+          border-radius: 8px; background: var(--accent); color: var(--accent-ink); }
+  .brand-subtitle { color: var(--muted); font-size: 15px; white-space: nowrap; overflow: hidden;
+                    text-overflow: ellipsis; margin: 0; }
+  @media (max-width: 1250px) { .brand-subtitle { display: none; } }
+  #msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #msg.ok { color: var(--green); } #msg.bad { color: var(--red); } #msg.info { color: var(--muted); }
+  .job-count { margin-left: auto; color: var(--muted); font-size: 16px; font-weight: 600; white-space: nowrap; }
+
+  .list-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 32px 24px; }
+  .joblist { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 0 20px; }
+  .job-table-header, .job-row {
+    display: grid;
+    grid-template-columns: 40px minmax(260px, 1fr) 170px 200px 140px 210px 236px;
+    column-gap: 16px; align-items: center;
+  }
+  /* Whole cell is the tap target (48px touch rule) — the <label> forwards taps to the box. */
+  .sel { display: flex; align-items: center; justify-content: center; align-self: stretch;
+         min-height: 48px; cursor: pointer; }
+  .job-row.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .job-table-header > *, .job-row > * { min-width: 0; }
+  .job-table-header > span { font: 600 13px var(--mono); letter-spacing: .07em; text-transform: uppercase;
+                             color: var(--muted); padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .job-row { min-height: 68px; border-bottom: 1px solid var(--border); padding: 6px 0; }
+  .job-row:last-child { border-bottom: 0; }
+  .job-row.off .jname, .job-row.off .jpaths { opacity: .45; }
+  .jmain { overflow: hidden; }
+  .jname { font: 600 18px/24px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .jname .badge { margin-left: 8px; vertical-align: 2px; }
+  .jpaths { font: 500 13px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; }
+  .jpaths .arrow { color: var(--faint); }
+  .badge { display: inline-block; font: 600 12px var(--sans); padding: 2px 9px; border-radius: 999px;
+           color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+  .badge.mirror { color: var(--red); border-color: #6e2b28; }
+  .badge.off { color: var(--amber); border-color: #5c4a16; }
+  .cell { font-size: 15px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell b { color: var(--text); font-weight: 600; }
+  .st { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; max-width: 100%; }
+  .st .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .c-muted { color: var(--muted); font-weight: 400; }
+  .c-ok { color: var(--green); } .c-ok .dot { background: var(--green); }
+  .c-up { color: var(--blue); } .c-up .dot { background: var(--blue); }
+  .c-bad { color: var(--red); } .c-bad .dot { background: var(--red); }
+  .c-work { color: var(--text); } .c-work .dot { animation: pulse 1s infinite; background: var(--accent); }
+  @keyframes pulse { 0%,100% { opacity: .3 } 50% { opacity: 1 } }
+  .act { display: flex; justify-content: flex-end; align-items: center; gap: 8px; white-space: nowrap; }
+  .brk { display: none; } /* editor-surface line break inside a job card; inert in the panel grid */
+  .kebab { min-width: 48px; padding: 0; font-size: 20px; color: var(--muted); }
+  .empty { color: var(--muted); padding: 32px 8px; font-size: 17px; display: none; text-align: center; }
+
+  /* Per-site sign-in strip (web jobs) */
+  /* Sits at the BOTTOM of the main view (below the job list) — hidden unless something
+     needs attention or the user opens it with the header Accounts button. */
+  #sites { flex: none; display: flex; align-items: center; gap: 10px 18px; flex-wrap: wrap;
+           padding: 10px 32px; border-top: 1px solid var(--border); background: var(--panel-2);
+           font-size: 14px; color: var(--muted); }
+  #sites b { color: var(--text); }
+  #sites .sess-ok { color: var(--green); }
+  #sites .sess-none { color: var(--amber); font-weight: 600; }
+  #sites button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+  /* Header Accounts button flags attention (a dropped session / unconnected Drive) so the
+     user notices before scrolling to the bottom strip. */
+  #openAccounts.needs { border-color: var(--amber); color: var(--amber); }
+
+  /* Live run progress band */
+  #runbar { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 14px 32px;
+            border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  .runtop { display: flex; align-items: center; gap: 12px; }
+  #runName { font: 600 18px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .runphase { color: var(--muted); font-size: 14px; }
+  .runtop .grow { flex: 1; }
+  .rundisk { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .runtop button { min-height: 40px; }
+  .runpaths { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; align-items: baseline; }
+  .runlbl { color: var(--faint); font-size: 13px; }
+  /* Full paths, wrapped like Karen's window — never ellipsized: during a run you need to
+     see exactly which file is being touched. break-all because \-paths have no break points. */
+  .runpath { min-width: 0; font: 500 14px var(--mono); color: var(--text); word-break: break-all; }
+  .runfile { display: flex; align-items: baseline; gap: 10px; font: 500 14px var(--mono);
+             color: var(--text); white-space: nowrap; overflow: hidden; min-height: 20px; }
+  .runop { flex: none; font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .05em;
+           padding: 2px 8px; border-radius: 6px; }
+  .runop.copy { color: var(--blue); background: color-mix(in srgb, var(--blue) 16%, transparent); }
+  .runop.del { color: var(--red); background: color-mix(in srgb, var(--red) 16%, transparent); }
+  .runop.same { color: var(--muted); background: color-mix(in srgb, var(--muted) 14%, transparent); }
+  .runop.filtered { color: var(--faint); background: color-mix(in srgb, var(--faint) 14%, transparent); }
+  .runreason { flex: none; color: var(--faint); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #0d1117; overflow: hidden; }
+  .barfill { height: 100%; background: var(--accent); border-radius: 999px; width: 0;
+             transition: width .2s ease; }
+  .runcounts { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .runcounts b { color: var(--text); }
+
+  /* Last-run results band */
+  #lastband { flex: none; display: flex; align-items: center; gap: 16px; padding: 10px 32px;
+              border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  #bandBody { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px 18px;
+              flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  #bandBody b { color: var(--text); }
+  #bandBody .bn { font: 600 16px var(--sans); color: var(--text); }
+  #lastband button { min-height: 36px; padding: 0 14px; }
+  #bandClose { min-width: 36px; padding: 0; color: var(--muted); }
+
+  #rowMenu { position: fixed; z-index: 60; min-width: 280px; background: var(--panel-2);
+             border: 1px solid var(--border); border-radius: 12px; padding: 8px;
+             box-shadow: 0 16px 40px -8px #000; display: none; }
+  #rowMenu.show { display: block; }
+  #rowMenu button { display: flex; width: 100%; align-items: center; text-align: left; background: transparent;
+                    border: 0; border-radius: 8px; padding: 0 16px; min-height: 48px; font-weight: 500;
+                    font-size: 17px; color: var(--text); }
+  #rowMenu button:hover { background: #2a313a; }
+  #rowMenu button.danger { color: var(--red); }
+
+  /* ══ Secondary views ══ */
+  .vhead { flex: none; height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 32px;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  .vhead h2 { margin: 0; font: 600 24px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vstat { color: var(--muted); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vbody { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 16px 32px; overflow-y: auto; }
+  .vfoot { flex: none; height: 72px; display: flex; align-items: center; gap: 16px; padding: 0 32px;
+           border-top: 1px solid var(--border); background: var(--panel); }
+  .vfoot .grow { flex: 1; }
+  .vfoot button { min-width: 140px; font-size: 16px; }
+
+  .frow { flex: none; display: flex; gap: 16px; align-items: center; }
+  .frow label.fl { flex: none; width: 92px; font-size: 15px; color: var(--muted); text-align: right; }
+  .frow input[type=text] { flex: 1; min-width: 0; }
+  .frow input[type=number] { width: 110px; }
+  .pathpick { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .pathpick input { flex: 1; min-width: 0; }
+  .pathpick button { flex: none; }
+  .seg { display: inline-flex; padding: 4px; gap: 4px; border-radius: 10px; background: var(--panel);
+         border: 1px solid var(--border); flex: none; }
+  .seg button { min-height: 40px; border: 1px solid transparent; background: transparent; color: var(--muted);
+                border-radius: 7px; font-size: 15px; padding: 0 14px; }
+  .seg button.active { background: #21262d; color: var(--text); border-color: #444c56; }
+  .daychips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .daychips button { min-height: 40px; padding: 0 12px; font-size: 14px; color: var(--muted); }
+  .daychips button.active { background: #21262d; color: var(--text); border-color: var(--accent); }
+  .evu { color: var(--muted); font-size: 14px; margin-left: -8px; }
+  #everyWrap input[type=number] { width: 86px; }
+  #fCron { font-family: var(--mono); }
+  #cronNext.bad { color: var(--red); font-weight: 600; }
+  .fhelp { flex: none; color: var(--muted); font-size: 14px; margin: 0 0 0 108px; }
+  .fhelp.warn { color: var(--amber); font-weight: 600; }
+  #srcResolved, #dstResolved { font-family: var(--mono); font-size: 13px; margin-top: -6px; }
+  .fwarn { flex: none; color: var(--red); font-size: 14px; font-weight: 600; margin: 0 0 0 108px; }
+  .ferr { flex: none; color: var(--red); font-size: 16px; font-weight: 600; min-height: 1.3em; margin: 0; }
+
+  /* Result + log */
+  .summary { flex: none; display: flex; gap: 24px; flex-wrap: wrap; font-size: 16px; color: var(--muted); }
+  .summary b { color: var(--text); font-size: 18px; }
+  .oplist { flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
+            background: var(--panel); font: 500 14px var(--mono); }
+  .oprow { display: flex; gap: 16px; align-items: center; min-height: 40px; padding: 0 16px;
+           border-bottom: 1px solid #1c2128; }
+  .oprow:last-child { border-bottom: 0; }
+  .oprow .op { flex: none; width: 78px; font: 600 12px var(--sans); text-transform: uppercase; letter-spacing: .05em; }
+  .oprow .op.copy { color: var(--blue); } .oprow .op.del { color: var(--red); } .oprow .op.err { color: var(--red); }
+  .oprow .op.skip { color: var(--amber); }
+  .oprow .op.dl { color: var(--green); } .oprow .op.would { color: var(--blue); }
+
+  /* Recipes view */
+  textarea.recipe { flex: 1; min-height: 300px; resize: none; font: 400 14px/1.5 var(--mono); padding: 12px 14px;
+                    border-radius: 8px; color: var(--text); background: var(--panel); border: 1px solid var(--border); }
+  textarea.recipe:focus { outline: none; border-color: var(--accent); }
+  .rtabs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .rtabs button { min-height: 38px; font-size: 14px; }
+  .rtabs button.active { border-color: var(--accent); color: var(--accent); }
+  .oprow .rel { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .oprow .sz { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
+  /* Tap a cropped row to expand it to the full path/error (tap again to collapse);
+     the text is ordinary selectable text, so it can be copied either way. The load-more
+     sentinel and the nothing-to-do placeholder don't expand, so no pointer on those. */
+  .oprow { cursor: pointer; }
+  .oprow.resmore, .oprow.rnone { cursor: default; }
+  .oprow.open { align-items: flex-start; padding: 8px 16px; }
+  .oprow.open .rel { white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip; }
+  .logpre { flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
+            background: var(--panel); font: 500 14px/1.7 var(--mono); padding: 12px 16px; white-space: pre-wrap;
+            word-break: break-all; color: var(--muted); margin: 0; }
+
+  .link { color: var(--accent); text-decoration: none; }
+  .link:hover { text-decoration: underline; }
+
+  /* Filter groups manager: list beside an editor (master-detail) */
+  .filtsplit { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px 1fr; gap: 24px; }
+  .filtlist { min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  .filtrow { display: flex; flex-direction: column; gap: 2px; padding: 12px 16px; min-height: 56px;
+             justify-content: center; border-bottom: 1px solid #1c2128; cursor: pointer; }
+  .filtrow:last-child { border-bottom: 0; }
+  .filtrow.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+  .filtrow .fn { font: 600 16px var(--sans); color: var(--text); }
+  .filtrow .fw { font: 500 12px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .filtedit { display: flex; flex-direction: column; gap: 12px; align-content: start; }
+  .filtedit textarea { flex: 1; min-height: 160px; resize: none; font: 400 15px var(--mono); padding: 12px 14px;
+                       border-radius: 8px; color: var(--text); background: var(--panel); border: 1px solid var(--border); }
+  .filtedit textarea:focus { outline: none; border-color: var(--accent); }
+  @media (max-width: 900px) { .filtsplit { grid-template-columns: 1fr; } }
+  html[data-surface=editor] .filtsplit { grid-template-columns: 280px 1fr; }
+
+  #groupMenu { position: fixed; z-index: 60; min-width: 260px; max-height: 60vh; overflow-y: auto;
+               background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 8px;
+               box-shadow: 0 16px 40px -8px #000; display: none; }
+  #groupMenu.show { display: block; }
+  #groupMenu button { display: flex; flex-direction: column; width: 100%; align-items: flex-start; gap: 2px;
+                      text-align: left; background: transparent; border: 0; border-radius: 8px; padding: 8px 14px;
+                      min-height: 48px; color: var(--text); }
+  #groupMenu button:hover { background: #2a313a; }
+  #groupMenu .gm-n { font: 600 15px var(--sans); }
+  #groupMenu .gm-w { font: 500 12px var(--mono); color: var(--muted); }
+  #groupMenu .gm-empty { padding: 12px 14px; color: var(--muted); font-size: 14px; }
+  #groupMenu .sep { height: 1px; background: var(--border); margin: 6px 8px; }
+  #groupMenu button[data-manage] .gm-n { color: var(--accent); }
+
+  /* The same app owns both surfaces. The host adds _surface=editor when it embeds the
+     manifest's editor entry; panel mode remains the fixed 1920x480 touch layout above. */
+  html[data-surface=editor] body { font-size: 14px; }
+  html[data-surface=editor] .view.active { animation: none; }
+  html[data-surface=editor] .page-header,
+  html[data-surface=editor] .vhead { min-height: 60px; height: auto; padding: 8px 20px; }
+  html[data-surface=editor] .page-header h1,
+  html[data-surface=editor] .vhead h2 { font-size: 21px; }
+  html[data-surface=editor] .list-scroll,
+  html[data-surface=editor] .vbody { padding: 16px 20px 24px; }
+  html[data-surface=editor] #runbar { padding: 12px 20px; }
+  html[data-surface=editor] #lastband { padding: 8px 20px; }
+  html[data-surface=editor] #bandBody { font-size: 13px; }
+  /* The host's embed can be taller than the visible area, which pushed the bottom-pinned
+     footer (Save/Cancel) off-screen. In the editor surface, flow the document naturally and
+     make header/footer sticky so Back and Save are ALWAYS visible, whatever the iframe size. */
+  html[data-surface=editor], html[data-surface=editor] body { height: auto; overflow: visible; }
+  html[data-surface=editor] .view.active { height: auto; min-height: 0; }
+  html[data-surface=editor] .list-scroll, html[data-surface=editor] .vbody { overflow: visible; }
+  html[data-surface=editor] .vhead { position: sticky; top: 0; z-index: 25; }
+  html[data-surface=editor] .vfoot { position: sticky; bottom: 0; z-index: 25; }
+  html[data-surface=editor] .oplist, html[data-surface=editor] .logpre,
+  html[data-surface=editor] .filtlist { max-height: 420px; }
+  html[data-surface=editor] .filtsplit { flex: none; }
+  html[data-surface=editor] .filtedit textarea { min-height: 200px; }
+  html[data-surface=editor] .vfoot { min-height: 64px; height: auto; padding: 8px 20px; }
+  html[data-surface=editor] button { min-height: 40px; padding: 0 14px; }
+  html[data-surface=editor] input[type=text],
+  html[data-surface=editor] input[type=number],
+  html[data-surface=editor] input[type=time],
+  html[data-surface=editor] input[type=datetime-local] { min-height: 40px; font-size: 15px; }
+  html[data-surface=editor] .chk { min-height: 40px; font-size: 14px; }
+  html[data-surface=editor] .job-table-header { display: none; }
+  html[data-surface=editor] .joblist { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; }
+  html[data-surface=editor] #rows { display: grid; gap: 6px; }
+  /* Compact card: name + paths and the buttons share the top line; schedule / last run /
+     next run / status flow together on ONE wrapping line below (the .brk element forces
+     the line break; it is display:none in the panel's table layout). */
+  html[data-surface=editor] .job-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px;
+    min-height: 0; min-width: 0; /* a grid item won't shrink below content without this */
+    padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel);
+  }
+  html[data-surface=editor] .job-row .sel { order: 0; min-height: 40px; min-width: 36px; }
+  html[data-surface=editor] .job-row .jmain { order: 1; flex: 1 1 240px; min-width: 0; }
+  html[data-surface=editor] .job-row .act { order: 2; margin-left: auto; }
+  html[data-surface=editor] .job-row .brk { display: block; order: 3; flex-basis: 100%; height: 0; }
+  html[data-surface=editor] .job-row > .cell, html[data-surface=editor] .job-row > .st { order: 4; font-size: 13px; }
+  html[data-surface=editor] .job-row button { min-height: 32px; padding: 0 12px; font-size: 13px; }
+  html[data-surface=editor] .job-row .kebab { min-width: 36px; }
+  html[data-surface=editor] .job-row.selected { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+  html[data-surface=editor] .jname { font-size: 15px; line-height: 20px; }
+  html[data-surface=editor] .jpaths { font-size: 12px; }
+  html[data-surface=editor] .job-row > :nth-child(3)::before { content: 'Schedule: '; color: var(--faint); }
+  html[data-surface=editor] .job-row > :nth-child(4)::before { content: 'Last: '; color: var(--faint); }
+  html[data-surface=editor] .job-row > :nth-child(5)::before { content: 'Next: '; color: var(--faint); }
+  html[data-surface=editor] .frow { flex-wrap: wrap; gap: 8px 12px; }
+  html[data-surface=editor] .frow label.fl { width: 90px; }
+  html[data-surface=editor] .fhelp,
+  html[data-surface=editor] .fwarn { margin-left: 102px; }
+  html[data-surface=editor] .brand-subtitle { display: none; }
+
+  @media (max-width: 760px) {
+    html[data-surface=editor] .page-header { flex-wrap: wrap; }
+    html[data-surface=editor] .job-count { margin-left: 0; }
+    html[data-surface=editor] .job-row .act { flex-wrap: wrap; }
+    html[data-surface=editor] .frow label.fl { width: 100%; text-align: left; }
+    html[data-surface=editor] .pathpick { flex-basis: 100%; }
+    html[data-surface=editor] .fhelp,
+    html[data-surface=editor] .fwarn { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══ Main: job list ══ -->
+<div id="viewMain" class="view active">
+  <header class="page-header">
+    <span class="logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"/><path d="M4 7h11a5 5 0 0 1 5 5"/><path d="m16 21 4-4-4-4"/><path d="M20 17H9a5 5 0 0 1-5-5"/></svg></span>
+    <h1>FileBridge</h1>
+    <p class="brand-subtitle">Replicate folders between drives and network shares — on demand or on a schedule.</p>
+    <span id="msg"></span>
+    <span class="job-count" id="count"></span>
+    <button id="openWin" hidden>Open in window</button>
+    <button id="openLog">Activity</button>
+    <button id="openRules">Rules</button>
+    <button id="openAccounts" hidden>Accounts</button>
+    <button id="selAll" hidden>Select all</button>
+    <button id="runSel" disabled>Run selected</button>
+    <button id="addJob" class="primary">Add job</button>
+  </header>
+  <!-- Live progress: shown only while a job runs. Layout stays stable (design-system state
+       consistency) — it's a flex:none band above the scrolling list, not an overlay. -->
+  <div id="runbar" hidden>
+    <div class="runtop">
+      <span class="st c-work"><span class="dot"></span></span>
+      <span id="runName"></span>
+      <span id="runPhase" class="runphase"></span>
+      <span class="grow"></span>
+      <span id="runDisk" class="rundisk"></span>
+      <button id="runStopAll" class="danger" hidden>Stop all</button>
+      <button id="runStop" class="danger">Stop</button>
+    </div>
+    <!-- Live paths, Karen-style: the full source and destination of the file being
+         examined/copied right now — not a bare count. -->
+    <div class="runpaths">
+      <span class="runlbl">Source</span><span class="runpath" id="runSrc"></span>
+      <span class="runlbl">Destination</span><span class="runpath" id="runDst"></span>
+    </div>
+    <div class="runfile"><span id="runOp" class="runop"></span><span id="runReason" class="runreason"></span></div>
+    <div class="bar"><div class="barfill" id="runFill"></div></div>
+    <div class="runcounts" id="runCounts"></div>
+  </div>
+  <!-- Last-run results band (Karen's auto-shown Last Run panel): the newest finished run's
+       numbers, visible on the main view without opening the result detail. Dismissible;
+       reappears when a newer run finishes. -->
+  <div id="lastband" hidden>
+    <div id="bandBody"></div>
+    <button id="bandDetails">Details</button>
+    <button id="bandClose" aria-label="Dismiss">✕</button>
+  </div>
+  <div class="list-scroll">
+    <div class="joblist" id="joblist">
+      <div class="job-table-header">
+        <span></span><span>Job</span><span>Schedule</span><span>Last run</span><span>Next run</span><span>Status</span><span></span>
+      </div>
+      <div id="rows"></div>
+    </div>
+    <div class="empty" id="empty">No jobs yet — tap <b>Add job</b> to set up your first folder copy.</div>
+  </div>
+  <!-- Accounts strip — sign-in/connection state for web-drop sites and Google Drive. Lives at
+       the BOTTOM and stays hidden while everything's healthy; it auto-surfaces the item(s)
+       that need attention, and the header Accounts button reveals the full set on demand. -->
+  <div id="sites" hidden></div>
+  <!-- Google Drive API credentials (shown via the Set up… chip button; lives OUTSIDE #sites so
+       the poll re-render can never wipe what's being typed). The client secret goes straight to
+       the HOST's OAuth store — this app never persists it. -->
+  <div id="driveSetup" hidden style="padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--border)">
+    <input id="driveClientId" type="text" placeholder="Google OAuth client ID" style="flex:1;min-width:260px">
+    <input id="driveClientSecret" type="password" placeholder="Client secret" style="flex:1;min-width:180px">
+    <button id="driveConnectBtn" class="primary">Save &amp; connect</button>
+    <span class="fhelp" style="flex-basis:100%;margin:0">From Google Cloud Console: create an OAuth client of type <b>Desktop app</b>, publish the consent screen to <b>Production</b> (or the connection expires weekly), and paste its ID and secret here. Approval opens in your browser; the credentials are stored by the open-quake host, not this app.</span>
+  </div>
+</div>
+
+<!-- ══ Add / edit a job ══ -->
+<div id="viewEdit" class="view">
+  <div class="vhead">
+    <button class="back" id="editBack">‹ Back</button>
+    <h2 id="editTitle">Add a job</h2>
+    <span class="vstat" id="editStat"></span>
+  </div>
+  <div class="vbody">
+    <div class="frow">
+      <label class="fl" for="fName">Name</label>
+      <input type="text" id="fName" placeholder="Documents to NAS" style="max-width:520px">
+      <label class="chk"><input type="checkbox" id="fEnabled" checked> Enabled</label>
+    </div>
+    <div class="frow">
+      <label class="fl">Type</label>
+      <span class="seg" id="fKind">
+        <button data-k="folder" class="active">Folder sync</button><button data-k="web">Web drops</button>
+      </span>
+      <span class="fhelp" style="margin:0" id="kindHelp"></span>
+    </div>
+    <div class="frow webOnly" hidden>
+      <label class="fl" for="fUrl">Site page</label>
+      <input type="text" id="fUrl" placeholder="https://the-site.com/releases — the page that lists the drops" style="flex:1">
+      <button type="button" id="fLogin">Open sign-in window</button>
+    </div>
+    <p class="fhelp webOnly" id="ruleMatch" hidden></p>
+    <div class="frow webOnly" hidden>
+      <label class="fl" for="fBackfill">Per run</label>
+      <input type="text" id="fBackfill" value="4" style="max-width:120px">
+      <span class="fhelp" style="margin:0">How many of the newest not-yet-downloaded collections EACH run fetches — a number, or <b>all</b>. A scheduled job works through a deep backlog this many per run.</span>
+    </div>
+    <div class="frow webOnly" hidden>
+      <label class="fl" for="fWebPattern">Folders</label>
+      <input type="text" id="fWebPattern" placeholder="{collection}\{item}  (default)" style="max-width:420px">
+      <span class="fhelp" style="margin:0">Tokens: <b>{collection} {item} {site} {yyyy} {mm} {dd}</b></span>
+    </div>
+    <div class="frow folderOnly">
+      <label class="fl" for="fSource">Source</label>
+      <span class="pathpick">
+        <input type="text" id="fSource" placeholder="C:\Users\you\Documents — or paste a Google Drive folder link">
+        <button type="button" class="pickFolder" data-target="fSource">Browse…</button>
+      </span>
+    </div>
+    <p class="fhelp folderOnly" id="srcResolved" hidden></p>
+    <div class="frow">
+      <label class="fl" for="fDest">Destination</label>
+      <span class="pathpick">
+        <input type="text" id="fDest" placeholder="\\server\share\Documents">
+        <button type="button" class="pickFolder" data-target="fDest">Browse…</button>
+      </span>
+    </div>
+    <div class="frow folderOnly">
+      <label class="fl"></label>
+      <label class="chk"><input type="checkbox" id="fSrcSub"> Copy into a subfolder named after the source folder</label>
+    </div>
+    <div class="frow folderOnly">
+      <label class="fl"></label>
+      <label class="chk"><input type="checkbox" id="fDriveApi"> Read source through the Drive API</label>
+    </div>
+    <p class="fhelp folderOnly">For Google Drive link sources: reads the folder straight from Google's servers, so it sees <b>everything</b> shared with you — the local Drive mount can hide other members' files — and needs no Drive for Desktop. Requires the Google Drive connection (set it up from the chip on the main screen). Content compare uses Google's checksums without downloading.</p>
+    <div class="frow folderOnly">
+      <label class="fl"></label>
+      <label class="chk"><input type="checkbox" id="fExportNative"> Export Google Docs/Sheets/Slides to Office files</label>
+    </div>
+    <p class="fhelp folderOnly">Drive-API jobs only: converts Google-native documents as they copy — a Sheet becomes <b>.xlsx</b>, a Doc <b>.docx</b>, a Slides deck <b>.pptx</b> (named after the document). Off, they're skipped (they have no downloadable file). Google caps document export at 10 MB — larger ones report an error. Exported files are compared by modification time only (Drive gives no size or checksum for them).</p>
+    <p class="fhelp folderOnly" id="dstResolved" hidden></p>
+    <p class="fhelp folderOnly">You can paste a <b>Google Drive folder link</b> — it resolves to your Drive for Desktop mount at run time (the folder needs a shortcut in your Drive: right-click → Organize → Add shortcut). Paths may contain date tokens that expand when the job runs — <b>D:\Backup\&lt;yyyy-mm-dd&gt;</b> becomes D:\Backup\2026-08-30. Tokens: <b>yyyy yy mm dd hh nn ss day month dow doy woy wom quarter</b>.</p>
+    <div class="frow folderOnly">
+      <label class="fl">Options</label>
+      <label class="chk"><input type="checkbox" id="fSub" checked> Include subfolders</label>
+      <label class="chk"><input type="checkbox" id="fMirror"> Mirror deletions</label>
+      <label class="chk"><input type="checkbox" id="fDelBefore"> Delete old copy before creating new</label>
+      <label class="chk"><input type="checkbox" id="fFollowLnk"> Follow shortcuts</label>
+    </div>
+    <p class="fhelp folderOnly">Follow shortcuts copies what a .lnk points at — a Google Drive folder shortcut becomes a real folder (named like the shortcut) with the target's content — instead of copying the useless .lnk file itself.</p>
+    <div class="frow folderOnly">
+      <label class="fl">Copy</label>
+      <label class="chk"><input type="checkbox" id="fChanged" checked> Only files that changed or are new</label>
+      <span class="fhelp" id="allFilesHint" hidden style="margin:0">Every file is copied every run, even unchanged ones.</span>
+    </div>
+    <div class="frow folderOnly" id="compareOpts">
+      <label class="fl">Changed if</label>
+      <label class="chk"><input type="checkbox" id="fCmpTime" checked> Modification time differs</label>
+      <label class="chk" id="fNewerWrap"><input type="checkbox" id="fNewer"> …and source is newer</label>
+      <label class="chk"><input type="checkbox" id="fCmpSize" checked> Size differs</label>
+      <label class="chk"><input type="checkbox" id="fCmpContent"> Content differs <span style="color:var(--faint)">(slower)</span></label>
+    </div>
+    <div class="frow folderOnly">
+      <label class="fl" for="fInclude">Copy only</label>
+      <input type="text" id="fInclude" placeholder="*.docx; *.xls*  (blank = all files)" style="flex:1">
+      <button type="button" class="insertGroup" data-target="fInclude">+ Group</button>
+    </div>
+    <div class="frow folderOnly">
+      <label class="fl" for="fExclude">Skip</label>
+      <input type="text" id="fExclude" placeholder="*.tmp; node_modules" style="flex:1">
+      <button type="button" class="insertGroup" data-target="fExclude">+ Group</button>
+    </div>
+    <p class="fhelp folderOnly">Add reusable wildcard sets with <b>+ Group</b>, or <a href="#" class="link" id="manageFilters">manage filter groups…</a></p>
+    <p class="fwarn folderOnly" id="mirrorWarn" hidden>Mirror deletes files and folders from the destination when they no longer exist in the source. Use Preview first.</p>
+    <div class="frow folderOnly" id="mirrorOpts" hidden>
+      <label class="fl">On delete</label>
+      <label class="chk"><input type="checkbox" id="fRecycle" checked> Move deleted items to Recycle Bin</label>
+      <label class="chk"><input type="checkbox" id="fTestSrc" checked> Test connection to source first</label>
+    </div>
+    <p class="fhelp folderOnly" id="mirrorOptsHelp" hidden>Recycle Bin keeps deletions recoverable — it only works on local drives, not network shares. Test connection skips all deletions if the source reads as empty (a disconnected share), so a mirror can't wipe the destination. Items matching a Skip pattern are protected: mirror never deletes them from the destination.</p>
+    <div class="frow">
+      <label class="fl">Schedule</label>
+      <span class="seg" id="fSched">
+        <button data-s="manual" class="active">Manual</button><button data-s="every">Repeat</button><button data-s="cron">Cron</button>
+      </span>
+      <input type="text" id="fCron" hidden placeholder="0 3 * * *" spellcheck="false"
+             aria-label="Cron expression (minute hour day-of-month month day-of-week)" style="max-width:300px">
+      <span class="daychips" id="cronPresets" hidden>
+        <button data-c="*/15 * * * *">Every 15 min</button>
+        <button data-c="0 * * * *">Hourly</button>
+        <button data-c="0 3 * * *">Daily 3 AM</button>
+        <button data-c="0 3 * * mon-fri">Weekdays 3 AM</button>
+        <button data-c="0 3 * * sun">Sundays 3 AM</button>
+      </span>
+      <label class="chk" id="missedWrap" hidden><input type="checkbox" id="fMissed" checked> Run when a missed time is caught up</label>
+    </div>
+    <!-- Sliding repeat interval (Karen parity): additive units + an explicit first run,
+         with roll-past weekday exclusions — for cadences cron can't express (every 90 min). -->
+    <div class="frow" id="everyWrap" hidden>
+      <label class="fl">Every</label>
+      <input type="number" id="fEvMins" min="0" value="0" aria-label="minutes"> <span class="evu">min</span>
+      <input type="number" id="fEvHours" min="0" value="0" aria-label="hours"> <span class="evu">hours</span>
+      <input type="number" id="fEvDays" min="0" value="0" aria-label="days"> <span class="evu">days</span>
+      <input type="number" id="fEvWeeks" min="0" value="0" aria-label="weeks"> <span class="evu">weeks</span>
+      <input type="number" id="fEvMonths" min="0" value="0" aria-label="months"> <span class="evu">months</span>
+    </div>
+    <p class="fhelp" id="everyHelp" hidden>Units add together — 1 day + 1 hour repeats every 25 hours, stepping from the starting time.</p>
+    <div class="frow" id="everyWrap2" hidden>
+      <label class="fl" for="fEvStart">Starting</label>
+      <input type="datetime-local" id="fEvStart" style="max-width:280px">
+      <span class="evu" style="margin-left:8px">Don't run on:</span>
+      <span class="daychips" id="fSkipDays">
+        <button type="button" data-d="0">Sun</button><button type="button" data-d="1">Mon</button><button type="button" data-d="2">Tue</button><button type="button" data-d="3">Wed</button><button type="button" data-d="4">Thu</button><button type="button" data-d="5">Fri</button><button type="button" data-d="6">Sat</button>
+      </span>
+    </div>
+    <p class="fhelp" id="cronNext" hidden></p>
+    <p class="fhelp">Cron: <b>minute hour day month weekday</b> — e.g. <b>*/30 8-18 * * mon-fri</b> is every 30 min, 8 AM–6 PM, weekdays. Wildcards are separated by <b>;</b> and match file names or relative paths — <b>*</b> any run of characters, <b>?</b> one character, <b>#</b> one digit, <b>[ab]</b>/<b>[!ab]</b> character sets; <b>*.*</b> matches every file, extensionless included. Schedules run while open-quake is running.</p>
+    <p class="ferr" id="editErr"></p>
+  </div>
+  <div class="vfoot">
+    <button class="danger" id="fDelete" hidden>Delete job</button>
+    <span class="grow"></span>
+    <button id="editCancel">Cancel</button>
+    <button id="fSave" class="primary">Save job</button>
+  </div>
+</div>
+
+<!-- ══ Preview / last-run detail ══ -->
+<div id="viewResult" class="view">
+  <div class="vhead">
+    <button class="back" id="resBack">‹ Back</button>
+    <h2 id="resTitle">Preview</h2>
+    <span class="vstat" id="resStat"></span>
+  </div>
+  <div class="vbody">
+    <div class="summary" id="resSummary"></div>
+    <div class="summary" id="resLife" hidden style="font-size:14px"></div>
+    <div class="oplist" id="resList"></div>
+  </div>
+  <div class="vfoot">
+    <button id="resResetStats" hidden>Reset lifetime stats</button>
+    <span class="grow"></span>
+    <button id="resClose">Close</button>
+    <button id="resRun" class="primary" hidden>Run this job now</button>
+  </div>
+</div>
+
+<!-- ══ Activity log ══ -->
+<div id="viewLog" class="view">
+  <div class="vhead">
+    <button class="back" id="logBack">‹ Back</button>
+    <h2>Activity</h2>
+    <span class="vstat" id="logStat"></span>
+  </div>
+  <div class="vbody">
+    <div class="summary" id="grandLine" hidden style="font-size:14px"></div>
+    <pre class="logpre" id="logPre"></pre>
+  </div>
+  <div class="vfoot">
+    <span class="vstat">Jobs are stored in <span id="dataDir" style="font-family:var(--mono)"></span> — copy jobs.json to another machine to move them.</span>
+    <span class="grow"></span>
+    <label class="chk"><input type="checkbox" id="alertSound" checked> Beep when a run finishes</label>
+    <button id="resetGrand" hidden>Reset totals</button>
+    <button id="openData">Open config folder</button>
+  </div>
+</div>
+
+<!-- ══ Filter groups manager ══ -->
+<div id="viewFilters" class="view">
+  <div class="vhead">
+    <button class="back" id="filtBack">‹ Back</button>
+    <h2>Filter groups</h2>
+    <span class="vstat">Reusable wildcard sets you can insert into a job's Copy-only or Skip list.</span>
+  </div>
+  <div class="vbody">
+    <div class="filtsplit">
+      <div class="filtlist" id="filtList"></div>
+      <div class="filtedit" id="filtEdit" hidden>
+        <div class="frow"><label class="fl" for="fgName">Name</label>
+          <input type="text" id="fgName" placeholder="Common image files" style="flex:1"></div>
+        <label class="fl" for="fgWild" style="width:auto;text-align:left">Wildcards (one per line or separated by ;)</label>
+        <textarea id="fgWild" spellcheck="false" placeholder="*.jpg&#10;*.png&#10;*.gif"></textarea>
+        <p class="ferr" id="fgErr"></p>
+        <div class="frow"><button class="danger" id="fgDelete">Delete group</button><span class="grow"></span>
+          <button id="fgSave" class="primary">Save group</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="vfoot">
+    <button id="fgNew" class="primary">+ New group</button>
+    <span class="grow"></span>
+    <button id="filtDone">Done</button>
+  </div>
+</div>
+
+<!-- ══ Web-drop rules (user-supplied per-site instruction files) ══ -->
+<div id="viewRecipes" class="view">
+  <div class="vhead">
+    <button class="back" id="recBack">‹ Back</button>
+    <h2>Rules</h2>
+    <span class="vstat">Your instruction files for web-drop jobs — which hostnames a rule handles (<b>match</b>), where the drops are listed, what counts as an item, and how its download is triggered.</span>
+  </div>
+  <div class="vbody">
+    <div class="rtabs" id="recTabs"></div>
+    <textarea class="recipe" id="recText" spellcheck="false"></textarea>
+    <p class="ferr" id="recErr"></p>
+  </div>
+  <div class="vfoot">
+    <button class="danger" id="recDelete">Delete rule</button>
+    <button id="openRulesFolder">Open rules folder</button>
+    <button id="openGuide">How to write a rule</button>
+    <span class="vstat">Save validates with the same checks the runner uses. New site: change <b>site</b> to a new id and Save — it becomes a new rule file.</span>
+    <span class="grow"></span>
+    <button id="recDone">Done</button>
+    <button id="recSave" class="primary">Validate &amp; save</button>
+  </div>
+</div>
+
+<!-- ══ How to write a rule — in-app authoring guide (works for any user, no tooling needed) ══ -->
+<div id="viewGuide" class="view">
+  <div class="vhead">
+    <button class="back" id="guideBack">‹ Back</button>
+    <h2>Writing a rule</h2>
+    <span class="vstat">A rule teaches FileBridge how one subscription site is laid out and how a download is triggered.</span>
+  </div>
+  <div class="vbody" id="guideBody">
+    <style>
+      #guideBody h3 { margin: 20px 0 6px; font-size: 16px; color: var(--text); }
+      #guideBody h3:first-child { margin-top: 0; }
+      #guideBody p, #guideBody li { font-size: 15px; color: var(--muted); line-height: 1.55; max-width: 80ch; }
+      #guideBody p { margin: 6px 0; }
+      #guideBody ul, #guideBody ol { margin: 6px 0; padding-left: 22px; }
+      #guideBody li { margin: 5px 0; }
+      #guideBody b { color: var(--text); }
+      #guideBody code { font-family: var(--mono); font-size: 13px; color: var(--text); }
+      #guideBody pre { font: 400 13px/1.55 var(--mono); color: var(--text); background: #0d1117;
+                       border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+                       overflow-x: auto; white-space: pre; max-width: 100%; }
+    </style>
+    <p>A <b>job</b> is a listing URL you paste plus a destination folder. A <b>rule</b> (this file) is matched to the job by hostname and tells FileBridge how to walk the site. Rules are yours — they live in your config folder, one <code>&lt;site&gt;.json</code> per site. Editing here validates on <b>Save</b>; you can also <b>Open rules folder</b> and edit the files in any text editor.</p>
+
+    <h3>Start here — four questions</h3>
+    <ol>
+      <li><b>How do you sign in?</b> Note the login page URL, and one element that only shows when signed in (an account link, avatar) — that becomes <code>auth.probeSel</code>. Note any URL fragment the site shows when signed out (e.g. <code>/login</code>) → <code>auth.loggedOutUrlIncludes</code>.</li>
+      <li><b>How are collections listed?</b> A page listing many collections (a vault/library) → <b>listing</b> mode; find the substring shared by every collection link (e.g. <code>/projects/</code>) → <code>collectionHrefIncludes</code>. A numbered series (<code>drop-360, drop-359…</code>) → <b>sequential</b> mode with a <code>pattern</code> like <code>/drops/drop-{n}</code>.</li>
+      <li><b>One level or two?</b> A collection page listing several downloadable items → <code>collection.itemSel</code> (a selector for those item links). Each collection page <i>is</i> the single download → <code>collection.selfItem: true</code>.</li>
+      <li><b>What triggers the download?</b> See <b>Download triggers</b> below.</li>
+    </ol>
+
+    <h3>The rule file</h3>
+    <pre>{
+  "site": "example",                 // short lowercase id; also the filename
+  "name": "Example Site",            // label shown on the session chip
+  "match": ["example.com"],          // hostname(s); www.example.com is covered too
+  "auth": {
+    "loginUrl": "https://www.example.com/login",
+    "probeSel": "a[href*='/account']",     // present ONLY when signed in
+    "loggedOutUrlIncludes": ["/login"]     // a run seeing this stops: "sign in"
+  },
+  "sources": [
+    { "id": "releases", "mode": "listing",
+      "collectionHrefIncludes": "/release/",  // listing mode
+      "listUrl": "/releases" }                // optional; defaults to the job's URL
+    // sequential instead:  "mode": "sequential", "pattern": "/drops/drop-{n}"
+  ],
+  "collection": { "itemSel": "a[href*='/item/']" },
+  //  or:         { "selfItem": true }        // the collection page IS the item
+  "item": {
+    "nameSel": "h1",                          // selector for the item's title
+    "downloadClickText": "download",          // visible text of the download control
+    "downloadAllSel": null,                   // optional: a chooser's file rows
+    "downloadTimeoutMs": 180000               // wait for the download to start (def 10 min)
+  },
+  "delayMs": 4000,                            // polite pause between items (min 500)
+  "pathPattern": "{collection}\\{item}"       // tokens: {site}{collection}{item}{yyyy}{mm}{dd}
+}</pre>
+
+    <h3>Download triggers</h3>
+    <ul>
+      <li><b>One button:</b> <code>"downloadClickText": "download"</code> — its visible text. Icon-only buttons with a separate text label work too; FileBridge clicks the real control next to the text.</li>
+      <li><b>Menu, then button:</b> a list clicked in order — <code>["download files", "download"]</code>.</li>
+      <li><b>A chooser of several files</b> (STL / renders / media, labels varying per product): set <code>downloadAllSel</code> to a selector for the chooser's <b>rows</b> — FileBridge clicks the control in every visible row. With it set, <code>downloadClickText</code> is used only to open the chooser.</li>
+    </ul>
+
+    <h3>Gotchas worth knowing</h3>
+    <ul>
+      <li><b>Membership-gated pages</b> may render links only after a check (e.g. Patreon). FileBridge waits up to 20 s; make sure your selectors match the <i>rendered</i> page while signed in.</li>
+      <li><b>An empty listing is an error</b>, not "nothing new" — so a wrong selector or a dead session fails loudly instead of silently syncing nothing.</li>
+      <li><b>A trigger that navigates off the item page</b> breaks the download — keep <code>downloadClickText</code> on the item page.</li>
+      <li><b>Slow prep is fine.</b> Sites that take minutes to build a file are handled; raise <code>downloadTimeoutMs</code> for very slow ones.</li>
+      <li><b>Sign in inside FileBridge</b> once per site via the session chip's <b>Open sign-in window</b> — being logged in elsewhere isn't enough.</li>
+    </ul>
+
+    <h3>Test it</h3>
+    <ol>
+      <li>Save the rule (here, or drop the <code>.json</code> in the rules folder).</li>
+      <li>Add a <b>Web drops</b> job: the site's listing URL as source, a scratch destination, <b>Per run</b> = <code>1</code>.</li>
+      <li>Sign in via the site's session chip, then <b>Run</b> — expect one collection's files under <code>dest\{collection}\{item}\</code>.</li>
+      <li><b>Run again</b> → <code>0 downloaded, N already seen</code> proves the ledger works. If it errors "no collections found", recheck the probe and the listing selector.</li>
+    </ol>
+
+    <h3>Two starting points</h3>
+    <p><b>Listing, single-level</b> (each listed page is the item, one Download button):</p>
+    <pre>{
+  "site": "myvault", "name": "My Vault", "match": ["myvault.example"],
+  "auth": { "loginUrl": "https://myvault.example/login",
+            "probeSel": "a[href*='/profile']", "loggedOutUrlIncludes": ["/login"] },
+  "sources": [{ "id": "vault", "mode": "listing",
+                "collectionHrefIncludes": "/projects/", "listUrl": "/projects" }],
+  "collection": { "selfItem": true },
+  "item": { "nameSel": "h1", "downloadClickText": "download model files",
+            "downloadTimeoutMs": 300000 },
+  "pathPattern": "{item}"
+}</pre>
+    <p><b>Sequential, two-level with a file chooser</b> (numbered drops, several files each):</p>
+    <pre>{
+  "site": "mydrops", "name": "My Drops", "match": ["drops.example"],
+  "auth": { "loginUrl": "https://drops.example/login",
+            "probeSel": "a[href*='/account']", "loggedOutUrlIncludes": ["/login"] },
+  "sources": [{ "id": "main", "mode": "sequential",
+                "pattern": "/drops/drop-{n}", "listUrl": "/drops" }],
+  "collection": { "itemSel": "a[href*='/product/']" },
+  "item": { "downloadClickText": "download files",
+            "downloadAllSel": "[class*=FileRow]", "downloadTimeoutMs": 600000 },
+  "delayMs": 4000, "pathPattern": "{collection}\\{item}"
+}</pre>
+  </div>
+  <div class="vfoot">
+    <span class="vstat">Tip: <b>Copy guide</b> and paste it into any AI assistant — it doubles as a prompt for help building a rule from a site you describe.</span>
+    <span class="grow"></span>
+    <button id="copyGuide">Copy guide</button>
+    <button id="guideDone" class="primary">Done</button>
+  </div>
+</div>
+
+<div id="rowMenu"></div>
+<div id="groupMenu"></div>
+<script src="app.js"></script>
+</body>
+</html>
