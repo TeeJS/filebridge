@@ -595,6 +595,19 @@ async function run(j) {
     assert(echo.ok, echo.error);
     lr = await call('list');
     assert.equal(lr.jobs.find(x => x.id === jid).stats.runs, 1, 'save must keep server-owned stats');
+    // duplicate: clones settings under a new id, "(copy)" name, disabled, fresh bookkeeping
+    const dup = await call('duplicate', { id: jid });
+    assert(dup.ok && dup.id && dup.id !== jid, 'duplicate returns a new id');
+    lr = await call('list');
+    const cp = lr.jobs.find(x => x.id === dup.id);
+    assert(cp, 'the copy appears in the list');
+    assert.equal(cp.name, sj.name + ' (copy)', 'copy is named "<name> (copy)"');
+    assert.equal(cp.enabled, false, 'copy is disabled so it never auto-runs unreviewed');
+    assert.equal(cp.source, SRC, 'copy keeps the source');
+    assert.equal(cp.dest, sj.dest, 'copy keeps the (raw, token) dest');
+    assert(!cp.stats && !cp.lastRun, 'copy starts with fresh bookkeeping, not the original run history');
+    assert(!(await call('duplicate', { id: 'nope' })).ok, 'duplicate of a missing job fails cleanly');
+    await call('remove', { id: dup.id }); // don't perturb later job-count assertions
     await call('resetStats', { id: jid });
     lr = await call('list');
     assert(!lr.jobs.find(x => x.id === jid).stats, 'resetStats clears the accumulators');

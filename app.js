@@ -343,6 +343,7 @@ function openMenu(btn, id) {
   const m = $('#rowMenu');
   m.innerHTML =
     '<button data-m="edit">Edit job</button>' +
+    '<button data-m="duplicate">Duplicate job</button>' +
     '<button data-m="result">View last result</button>' +
     '<button data-m="toggle">' + (j.enabled === false ? 'Enable' : 'Disable') + '</button>' +
     (j.kind === 'web' ? '<button data-m="ledger" class="danger">Reset seen ledger</button>' : '') +
@@ -366,6 +367,15 @@ document.addEventListener('click', e => {
   }
   m.classList.remove('show');
   if (item.dataset.m === 'edit') openEdit(j);
+  if (item.dataset.m === 'duplicate') api('duplicate', { id: j.id }).then(async r => {
+    // Create a disabled clone, then land in the editor on it so the user can tweak
+    // source/dest and enable when ready (the copy never auto-runs meanwhile).
+    if (!r.ok) { msg(r.error, 'bad'); return; }
+    await refreshList();
+    const copy = jobs.find(x => x.id === r.id);
+    if (copy) openEdit(copy);
+    else msg('Duplicated — disabled until you review it.', 'ok');
+  });
   if (item.dataset.m === 'result') openResult(j.id);
   if (item.dataset.m === 'toggle') api('save', { job: { ...j, enabled: j.enabled === false } }).then(r => { if (!r.ok) msg(r.error, 'bad'); refreshList(); });
   if (item.dataset.m === 'ledger') api('resetLedger', { id: j.id }).then(r => msg(r.ok ? 'Seen ledger reset — the next run treats everything as new.' : r.error, r.ok ? 'ok' : 'bad'));

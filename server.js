@@ -584,6 +584,25 @@ exports.handle = async function handle(action, ctx) {
     return { ok: true };
   }
 
+  if (action === 'duplicate') {
+    const id = String(body.id || '');
+    const cfg = loadCfg();
+    const orig = (cfg.jobs || []).find(x => x.id === id);
+    if (!orig) return { ok: false, error: 'job not found' };
+    // Clone all settings; drop the server-owned bookkeeping so the copy starts fresh. A new
+    // id means a web copy also gets a fresh seen-ledger (nothing at its seenPath yet).
+    const copy = { ...orig };
+    delete copy.lastRun; delete copy.stats; delete copy.lastSkippedDue;
+    copy.id = 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    copy.name = orig.name + ' (copy)';
+    copy.enabled = false; // never auto-run a duplicate until the user has reviewed it
+    copy.schedule = { ...(orig.schedule || { type: 'manual' }), since: Date.now() }; // re-anchor
+    cfg.jobs.push(copy);
+    saveCfg(cfg, true);
+    logLine(`duplicated job: ${orig.name} -> ${copy.name}`);
+    return { ok: true, id: copy.id };
+  }
+
   // ── web jobs: sign-in windows, recipes, seen ledger ─────────────────────────
   if (action === 'openLogin') {
     const url = String(body.url || '');
