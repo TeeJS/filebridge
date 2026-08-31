@@ -893,9 +893,23 @@ async function run(j) {
     // a Drive file and folder sharing one name cannot share one Windows path
     fake = makeFake({ root: [folder('subA', 'Thing'), file('f1', 'Thing', 'AAA')], subA: [file('f3', 'in.txt', 'CC')] }, contents);
     dp = await drive.planDrive(djob({}), deps(fake));
-    assert.deepEqual(dp.actions.map(a => a.rel), ['Thing/in.txt'], 'first listed wins the name');
+    assert.deepEqual(dp.actions.map(a => a.rel), ['Thing/in.txt'], 'a folder beats a same-named file (keep the whole subtree)');
     assert.equal(dp.errors.length, 0, 'file/folder name clash is a skip, not an error');
     assert(dp.nativeSkipped.some(n => /already here/.test(n.note)));
+    // "/"-> space means a slashed Drive name can now collide with a real space-named sibling.
+    // The winner must be DETERMINISTIC (Drive's list order isn't) and prefer the no-slash original
+    // (it already matches the desktop-client copy on disk), regardless of which is listed first.
+    for (const order of [['gSlash', 'gSpace'], ['gSpace', 'gSlash']]) {
+      const byId = { gSlash: folder('gSlash', 'Guns/Ammo'), gSpace: folder('gSpace', 'Guns Ammo') };
+      const cf = makeFake({
+        root: order.map(id => byId[id]),
+        gSlash: [file('x1', 'from-slash.txt', 'S')],
+        gSpace: [file('x2', 'from-space.txt', 'P')],
+      }, contents);
+      const cdp = await drive.planDrive(djob({}), deps(cf));
+      assert.deepEqual(cdp.actions.map(a => a.rel), ['Guns Ammo/from-space.txt'],
+        'the no-slash original wins the collision, and the winner never flips with listing order (' + order.join(',') + ')');
+    }
     // newer-only reason matches the local engine's vocabulary
     reset();
     fake = makeFake({ root: [file('f1', 'a.txt', 'AAA')] }, contents);
@@ -1122,6 +1136,17 @@ async function run(j) {
   const collectOn = await sync.plan(job({ exclude: '*.tmp' }), { collectUnchanged: true, collectFiltered: true });
   assert(collectOn.unchangedList.includes('keep.txt'), 'unchanged path collected when opted in');
   assert(collectOn.filteredList.includes('skip.tmp'), 'filtered path collected when opted in');
+
+  // ── Drive name sanitization must match Google Drive for Desktop (Windows) ──
+  // A "/" is legal in a Drive name but illegal on Windows; the desktop client renders it as a
+  // SPACE. Mapping it to "_" here made FileBridge miss the mount-made copies and re-download whole
+  // trees into duplicate "..._Weapons" folders. Slash/backslash -> space; other illegal -> "_".
+  assert.equal(drive.sanitizeName('Star Wars Blasters/Weapons'), 'Star Wars Blasters Weapons', 'forward slash -> space');
+  assert.equal(drive.sanitizeName('Halo/Bionicle Mashups'), 'Halo Bionicle Mashups', 'the other real dup case');
+  assert.equal(drive.sanitizeName('a\\b'), 'a b', 'backslash -> space too');
+  assert.equal(drive.sanitizeName('a:b?c*d'), 'a_b_c_d', 'the rarer illegal punctuation still -> _');
+  assert.equal(drive.sanitizeName('trailing/'), 'trailing', 'a trailing slash-space is trimmed, not left dangling');
+  assert.equal(drive.sanitizeName('  '), '_', 'an all-illegal/blank name falls back to _');
 
   fs.rmSync(ROOT, { recursive: true, force: true });
   console.log('file-bridge: all self-checks passed');

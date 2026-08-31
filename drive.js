@@ -37,7 +37,14 @@ const EXPORT_MAP = {
 };
 
 function sanitizeName(name) {
-  const s = String(name || '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim();
+  // Google Drive for Desktop on Windows renders a "/" in a Drive name (legal there, illegal on
+  // Windows) as a SINGLE SPACE — "Star Wars Blasters/Weapons" -> "Star Wars Blasters Weapons".
+  // FileBridge used to map "/" to "_", so it never matched the mount-made copies and re-downloaded
+  // whole trees into duplicate "..._Weapons" folders. Convert slash/backslash to space FIRST to
+  // match the desktop client; the trailing replace then only touches the rarer illegal punctuation.
+  const s = String(name || '')
+    .replace(/[\/\\]/g, ' ')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim();
   return s || '_';
 }
 
@@ -147,6 +154,25 @@ async function listTree(job, deps) {
     // second copy isn't reported as a name collision (this is the usual cause of a wall of
     // "duplicate name" errors on shared Patreon-style folders that the local mount shows fine).
     { const ids = new Set(); kids = kids.filter(k => ids.has(k.id) ? false : (ids.add(k.id), true)); }
+    // Deterministic order for the name-collision "keep first" rule below. Two DISTINCT Drive
+    // items can now sanitize to the same on-disk name (e.g. "Guns/Ammo" and a real "Guns Ammo"
+    // both -> "Guns Ammo"). Drive's listing order isn't guaranteed stable, so without this the
+    // kept-first winner could flip between runs and a mirror job would thrash (delete one
+    // subtree, re-download the other). Sort by sanitized name with a permanent-id tie-break so
+    // the winner is fixed forever. The plan set is otherwise order-independent.
+    kids.sort((a, b) => {
+      const an = sanitizeName(a.name).toLowerCase(), bn = sanitizeName(b.name).toLowerCase();
+      if (an !== bn) return an < bn ? -1 : 1;
+      // Same on-disk name (a collision): the winner must be fixed, not decided by Drive's order.
+      // Prefer the name that needs NO slash substitution (it already matches the desktop-client
+      // copy on disk), then a folder over a same-named file (keep the whole subtree, not one file),
+      // then the permanent Drive id as the final tie-break.
+      const asl = /[\/\\]/.test(a.name) ? 1 : 0, bsl = /[\/\\]/.test(b.name) ? 1 : 0;
+      if (asl !== bsl) return asl - bsl;
+      const af = a.mimeType === FOLDER ? 0 : 1, bf = b.mimeType === FOLDER ? 0 : 1;
+      if (af !== bf) return af - bf;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
     tick(undefined, relDir || '(root)'); // announce this folder
     const seenNames = new Set();
     for (const k of kids) {
