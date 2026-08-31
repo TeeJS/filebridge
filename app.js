@@ -367,10 +367,13 @@ let menuId = null;
 function openMenu(btn, id) {
   menuId = id;
   const j = jobs.find(x => x.id === id);
+  const idx = jobs.findIndex(x => x.id === id); // position controls run-all + same-tick order
   const m = $('#rowMenu');
   m.innerHTML =
     '<button data-m="edit">Edit job</button>' +
     '<button data-m="duplicate">Duplicate job</button>' +
+    (idx > 0 ? '<button data-m="up">Move up</button>' : '') +
+    (idx >= 0 && idx < jobs.length - 1 ? '<button data-m="down">Move down</button>' : '') +
     '<button data-m="result">View last result</button>' +
     '<button data-m="toggle">' + (j.enabled === false ? 'Enable' : 'Disable') + '</button>' +
     (j.kind === 'web' ? '<button data-m="ledger" class="danger">Reset seen ledger</button>' : '') +
@@ -403,6 +406,7 @@ document.addEventListener('click', e => {
     if (copy) openEdit(copy);
     else msg('Duplicated — disabled until you review it.', 'ok');
   });
+  if (item.dataset.m === 'up' || item.dataset.m === 'down') api('moveJob', { id: j.id, dir: item.dataset.m }).then(r => { if (!r.ok) msg(r.error, 'bad'); refreshList(); });
   if (item.dataset.m === 'result') openResult(j.id);
   if (item.dataset.m === 'toggle') api('save', { job: { ...j, enabled: j.enabled === false } }).then(r => { if (!r.ok) msg(r.error, 'bad'); refreshList(); });
   if (item.dataset.m === 'ledger') api('resetLedger', { id: j.id }).then(r => msg(r.ok ? 'Seen ledger reset — the next run treats everything as new.' : r.error, r.ok ? 'ok' : 'bad'));

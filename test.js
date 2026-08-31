@@ -623,6 +623,21 @@ async function run(j) {
     assert.equal((await call('status')).paused, true, 'status reflects the pause (for the live poll)');
     await call('setPaused', { paused: false });
     assert.equal((await call('status')).paused, false, 'resumed');
+    // manual job ordering: moveJob reorders the stored list (drives run-all + scheduler order)
+    const ma = await call('save', { job: { name: 'orderA', source: SRC, dest: DST, schedule: { type: 'manual' } } });
+    const mb = await call('save', { job: { name: 'orderB', source: SRC, dest: DST, schedule: { type: 'manual' } } });
+    const names = async () => (await call('list')).jobs.map(x => x.name);
+    let o = await names();
+    assert(o.indexOf('orderA') < o.indexOf('orderB'), 'inserted A before B');
+    await call('moveJob', { id: ma.id, dir: 'down' });
+    o = await names();
+    assert(o.indexOf('orderA') > o.indexOf('orderB'), 'move down puts A below B');
+    await call('moveJob', { id: ma.id, dir: 'up' });
+    o = await names();
+    assert(o.indexOf('orderA') < o.indexOf('orderB'), 'move up restores A above B');
+    assert((await call('moveJob', { id: (await call('list')).jobs[0].id, dir: 'up' })).unchanged, 'moving the top job up is a no-op');
+    assert(!(await call('moveJob', { id: 'nope', dir: 'up' })).ok, 'moving a missing job fails');
+    await call('remove', { id: ma.id }); await call('remove', { id: mb.id });
     // runMany: explicitly selected jobs run even when disabled (Karen's Run Highlighted)
     const sv2 = await call('save', { job: { name: 'srv2', source: SRC, dest: path.join(ROOT, 'dst2'), enabled: false, recycle: false, schedule: { type: 'manual' } } });
     assert(sv2.ok, sv2.error);

@@ -646,6 +646,20 @@ exports.handle = async function handle(action, ctx) {
     return { ok: true, id: copy.id };
   }
 
+  if (action === 'moveJob') {
+    // Reorder in the stored list — the order drives Run-all and the same-tick scheduler sequence.
+    const id = String(body.id || ''), dir = body.dir === 'up' ? -1 : 1;
+    const cfg = loadCfg();
+    const jobs = cfg.jobs || [];
+    const i = jobs.findIndex(j => j.id === id);
+    if (i < 0) return { ok: false, error: 'job not found' };
+    const k = i + dir;
+    if (k < 0 || k >= jobs.length) return { ok: true, unchanged: true }; // already at the end
+    [jobs[i], jobs[k]] = [jobs[k], jobs[i]];
+    saveCfg(cfg, true);
+    return { ok: true };
+  }
+
   // ── web jobs: sign-in windows, recipes, seen ledger ─────────────────────────
   if (action === 'openLogin') {
     const url = String(body.url || '');
