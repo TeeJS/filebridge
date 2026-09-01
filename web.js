@@ -190,13 +190,15 @@ async function runWebJob(job, rule, opts) {
   // Download capture: the session outlives the run, so the listener MUST be removed in
   // the finally. Only downloads we asked for (pending != null) are accepted — anything
   // arriving between items (a stray from a timed-out click) is refused outright.
-  let pending = null; // { dir, items: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent }
+  let pending = null; // { dir, items: [], names: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent }
   const onDownload = (event, item) => {
     if (!pending) { event.preventDefault(); return; }
     const p = pending;
     p.lastEvent = Date.now();
     p.items.push(item);
-    const file = path.join(p.dir, sanitizeName(item.getFilename() || 'download'));
+    const name = sanitizeName(item.getFilename() || 'download');
+    p.names.push(name); // surfaced in the run status so the user sees WHICH file is downloading
+    const file = path.join(p.dir, name);
     item.setSavePath(file);
     item.once('done', (_e, state) => {
       p.lastEvent = Date.now();
@@ -390,8 +392,16 @@ async function runWebJob(job, rule, opts) {
             const drill = allSel ? stepsRaw.filter(s => typeof s === 'string') : stepsRaw.slice(0, -1);
             const pagePath = new URL(win.webContents.getURL()).pathname;
             const samePage = () => { try { return new URL(win.webContents.getURL()).pathname === pagePath; } catch { return false; } };
-            const p = { dir, items: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent: Date.now() };
+            const p = { dir, items: [], names: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent: Date.now() };
             pending = p;
+            // Filenames become known only when a download actually starts (after any
+            // server-side prep). Show the newest few in the status so it reads
+            // "…/projects/x — bust.stl, base.stl — 2/3 downloads finished".
+            const namesLabel = () => {
+              const n = p.names;
+              if (!n.length) return '';
+              return ' — ' + (n.length <= 3 ? n.join(', ') : n.slice(0, 2).join(', ') + ' +' + (n.length - 2) + ' more');
+            };
             for (const stepText of drill) {
               if (!await waitFor(textFinderJs(stepText, false), 15000)) throw new Error('"' + stepText + '" control not found on the page');
               await evalJs(textFinderJs(stepText, true));
@@ -435,7 +445,7 @@ async function runWebJob(job, rule, opts) {
             const startDeadline = Date.now() + timeout;
             while (p.items.length < expected && Date.now() < startDeadline) {
               if (stop()) throw new Error('stopped');
-              opts.setPhase('item', itemPath + ' — ' + p.items.length + '/' + expected + ' downloads started');
+              opts.setPhase('item', itemPath + namesLabel() + ' — ' + p.items.length + '/' + expected + ' downloads started');
               await sleep(500);
             }
             if (p.items.length < expected) {
@@ -449,7 +459,7 @@ async function runWebJob(job, rule, opts) {
               if (stop()) throw new Error('stopped');
               const inFlight = p.items.length > p.doneReports;
               if (!inFlight && Date.now() - p.lastEvent >= 1500) break;
-              opts.setPhase('item', itemPath + ' — ' + p.doneReports + '/' + p.items.length + ' downloads finished');
+              opts.setPhase('item', itemPath + namesLabel() + ' — ' + p.doneReports + '/' + p.items.length + ' downloads finished');
               await sleep(300);
             }
             pending = null;
