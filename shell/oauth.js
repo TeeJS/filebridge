@@ -37,16 +37,22 @@ const page = (color, text) => '<!doctype html><meta charset="utf-8"><title>FileB
   + '<body style="font:16px Segoe UI,sans-serif;background:#0d1117;color:' + color + '">' + text + '</body>';
 
 class DriveAuth {
-  constructor({ file, openExternal, log = () => {}, fetchImpl = fetch, now = Date.now, signInTimeoutMs = SIGN_IN_TIMEOUT_MS }) {
+  constructor({ file, openExternal, log = () => {}, fetchImpl = fetch, now = Date.now, signInTimeoutMs = SIGN_IN_TIMEOUT_MS, retryDelaysMs = [1000, 4000] }) {
     this.file = file;
     this.signInTimeoutMs = signInTimeoutMs;
+    this.retryDelaysMs = retryDelaysMs; // waits between token-refresh attempts on a network error / 5xx
     this.openExternal = openExternal;
     this.log = log;
     this.fetchImpl = fetchImpl;
     this.now = now;
     this.pending = new Map(); // state -> { verifier, scopes, redirectUri }
     this.server = null;
+    this.listening = null;    // the one in-flight listen() — two Connect clicks share one listener
     this.serverTimer = null;
+    this.refreshing = null;   // the one in-flight refresh — parallel callers share it
+    // Bumped whenever the stored sign-in is dropped (Disconnect, a new client): a refresh that
+    // started before then must not write its tokens back afterwards.
+    this.generation = 0;
   }
 
   // ── storage ──────────────────────────────────────────────────────────────────
@@ -72,20 +78,26 @@ class DriveAuth {
     const secret = clientSecret ? dpapi.protectOne(clientSecret) : '';
     if (clientSecret && !secret) throw new Error('Google Drive settings could not be stored securely');
     const o = this.read();
+    const sameClient = o.clientId === clientId;
     // Tokens belong to the client that issued them — a new client starts disconnected.
-    if (o.clientId && o.clientId !== clientId) delete o.tokens;
+    if (o.clientId && !sameClient) { delete o.tokens; this.generation++; }
     o.clientId = clientId;
-    o.clientSecret = secret;
+    // Re-entering the same client ID with the secret left blank keeps the stored secret.
+    if (secret || !sameClient) o.clientSecret = secret;
     this.write(o);
   }
-  setTokens(t) {
+  // gen: the generation a refresh started in; a stale one is dropped instead of written.
+  setTokens(t, gen) {
+    if (gen !== undefined && gen !== this.generation) return false;
     const blob = dpapi.protectOne(JSON.stringify(Object.assign({}, t, { updatedAt: this.now() })));
     if (!blob) throw new Error('Google Drive tokens could not be stored securely');
     const o = this.read();
     o.tokens = blob;
     this.write(o);
+    return true;
   }
   deleteTokens() {
+    this.generation++;
     const o = this.read();
     delete o.tokens;
     this.write(o);
@@ -93,10 +105,13 @@ class DriveAuth {
 
   status() {
     const t = this.tokens();
+    // Connected = something that can still produce an access token: a refresh token, or an
+    // access token that has not expired yet.
+    const usable = !!(t && (t.refreshToken || (t.accessToken && (!t.expiresAt || this.now() < Number(t.expiresAt)))));
     return {
       provider: 'google-drive',
       configured: !!this.settings().clientId,
-      connected: !!(t && (t.accessToken || t.refreshToken)),
+      connected: usable,
       expiresAt: (t && t.expiresAt) || null,
       updatedAt: (t && t.updatedAt) || null,
       scopes: t && t.scope ? scopeList(t.scope) : [],
@@ -119,13 +134,15 @@ class DriveAuth {
       client_id: clientId, response_type: 'code', redirect_uri: redirectUri, response_mode: 'query',
       scope: requested.join(' '), state, code_challenge: challenge, code_challenge_method: 'S256',
     }).toString();
-    if (!await this.openExternal(url)) { this.pending.delete(state); this.closeIfIdle(); throw new Error('Could not open the Google sign-in page'); }
+    let opened = false;
+    try { opened = await this.openExternal(url); } catch {}
+    if (!opened) { this.pending.delete(state); this.closeIfIdle(); throw new Error('Could not open the Google sign-in page'); }
     return { ok: true };
   }
 
   listen() {
-    if (this.server) { this.armTimeout(); return Promise.resolve(this.server.address().port); }
-    return new Promise((resolve, reject) => {
+    if (this.listening) { this.armTimeout(); return this.listening; }
+    this.listening = new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => {
         const url = new URL(req.url || '/', 'http://127.0.0.1');
         if (req.method !== 'GET' || url.pathname !== '/oauth/callback') { res.writeHead(404); res.end(); return; }
@@ -139,13 +156,14 @@ class DriveAuth {
           this.log('[oauth] callback failed: ' + (e.message || e));
         }).finally(() => this.closeIfIdle());
       });
-      server.once('error', err => reject(new Error('Could not open the sign-in callback: ' + (err.message || err))));
+      server.once('error', err => { this.listening = null; reject(new Error('Could not open the sign-in callback: ' + (err.message || err))); });
+      this.server = server; // claimed now, so closeServer() can always reach it
       server.listen(0, '127.0.0.1', () => {
-        this.server = server;
         this.armTimeout();
         resolve(server.address().port);
       });
     });
+    return this.listening;
   }
   armTimeout() {
     clearTimeout(this.serverTimer);
@@ -156,6 +174,7 @@ class DriveAuth {
     clearTimeout(this.serverTimer);
     this.serverTimer = null;
     if (this.server) { try { this.server.close(); } catch {} this.server = null; }
+    this.listening = null;
   }
 
   async handleCallback(url) {
@@ -184,7 +203,12 @@ class DriveAuth {
     const text = await res.text();
     let data;
     try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text || res.statusText }; }
-    if (!res.ok || data.error) throw new Error(data.error_description || data.error || ('Token request failed: HTTP ' + res.status));
+    if (!res.ok || data.error) {
+      const e = new Error(data.error_description || data.error || ('Token request failed: HTTP ' + res.status));
+      e.status = res.status;
+      e.oauthError = typeof data.error === 'string' ? data.error : '';
+      throw e;
+    }
     return data;
   }
 
@@ -214,19 +238,45 @@ class DriveAuth {
     let cur = t;
     if (!(t.accessToken && (!t.expiresAt || this.now() < Number(t.expiresAt) - GOOGLE.skewMs))) {
       if (!t.refreshToken) return null;
-      const { clientId, clientSecret } = this.settings();
-      // Google's refresh request takes no redirect_uri (the loopback port changes per sign-in).
-      const next = await this.fetchToken({
-        grant_type: 'refresh_token', client_id: clientId, client_secret: clientSecret,
-        refresh_token: t.refreshToken, scope: requested.join(' '),
-      });
-      cur = this.normalize(Object.assign({}, next, {
-        refresh_token: next.refresh_token || t.refreshToken,
-        scope: next.scope || t.scope || '',
-      }), requested);
-      this.setTokens(cur);
+      if (!this.refreshing) this.refreshing = this.refresh(t, requested).finally(() => { this.refreshing = null; });
+      cur = await this.refreshing;
     }
     return { tokenType: cur.tokenType || 'Bearer', accessToken: cur.accessToken, expiresAt: cur.expiresAt, scope: cur.scope || '', scopes: scopeList(cur.scope) };
+  }
+
+  // One refresh, retried on a network error or a 5xx (a blip must not fail a whole scheduled
+  // run). invalid_grant means the sign-in is dead (revoked, expired, client deleted): forget
+  // it so the app shows "not connected" and asks for Connect, instead of failing every run
+  // behind a green chip.
+  async refresh(t, requested) {
+    const gen = this.generation;
+    const { clientId, clientSecret } = this.settings();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // Google's refresh request takes no redirect_uri (the loopback port changes per sign-in).
+        const next = await this.fetchToken({
+          grant_type: 'refresh_token', client_id: clientId, client_secret: clientSecret,
+          refresh_token: t.refreshToken, scope: requested.join(' '),
+        });
+        const cur = this.normalize(Object.assign({}, next, {
+          refresh_token: next.refresh_token || t.refreshToken,
+          scope: next.scope || t.scope || '',
+        }), requested);
+        this.setTokens(cur, gen); // skipped if Disconnect / a new client happened meanwhile
+        return cur;
+      } catch (e) {
+        if (e.oauthError === 'invalid_grant') {
+          if (gen === this.generation) this.deleteTokens();
+          const dead = new Error('the Google Drive sign-in expired or was revoked — click Connect on the Google Drive chip to sign in again');
+          dead.code = 'reauth_required';
+          throw dead;
+        }
+        const transient = !e.status || e.status >= 500;
+        if (!transient || attempt >= this.retryDelaysMs.length) throw e;
+        this.log('[oauth] token refresh failed (' + (e.message || e) + '), retrying');
+        await new Promise(r => setTimeout(r, this.retryDelaysMs[attempt]));
+      }
+    }
   }
 
   async disconnect() {

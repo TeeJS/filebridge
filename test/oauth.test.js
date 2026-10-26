@@ -20,13 +20,17 @@ function setup(opts = {}) {
   const auth = new DriveAuth({
     file,
     openExternal: async url => { opened.push(url); return true; },
+    // A response is a token body, { status, body } for an HTTP error, or a function (may throw / await).
     fetchImpl: async (url, init) => {
       posts.push({ url, body: Object.fromEntries(new URLSearchParams(init.body.toString())) });
-      const next = responses.shift() || { access_token: 'AT', expires_in: 3600, refresh_token: 'RT', scope: SCOPE };
+      let next = responses.shift() || { access_token: 'AT', expires_in: 3600, refresh_token: 'RT', scope: SCOPE };
+      if (typeof next === 'function') next = await next();
+      if (next && next.status) return { ok: false, status: next.status, statusText: 'ERR', text: async () => JSON.stringify(next.body || {}) };
       return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify(next) };
     },
     now: () => clock,
     signInTimeoutMs: opts.signInTimeoutMs || 60000,
+    retryDelaysMs: [10, 10],
   });
   return { auth, file, opened, posts, tick: ms => { clock += ms; } };
 }
@@ -132,6 +136,100 @@ test('a new client starts disconnected; disconnect revokes and forgets the token
   assert.equal(posts[0].body.token, 'R');
   assert.equal(auth.status().connected, false);
   assert.equal(auth.status().configured, true, 'the client stays for the next Connect');
+});
+
+test('invalid_grant forgets the dead sign-in, so the chip says "not connected"', async () => {
+  const { auth, tick } = setup({ responses: [{ status: 400, body: { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' } }] });
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: 1_000_000, scope: SCOPE });
+  tick(1000);
+  await assert.rejects(() => auth.getAccessToken([SCOPE]), e => e.code === 'reauth_required');
+  assert.equal(auth.status().connected, false);
+  assert.equal(auth.status().configured, true);
+});
+
+test('an expired access token with no refresh token is not "connected"', () => {
+  const { auth, tick } = setup();
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: '', expiresAt: 1_000_000 + 60000, scope: SCOPE });
+  assert.equal(auth.status().connected, true);
+  tick(120000);
+  assert.equal(auth.status().connected, false);
+});
+
+test('a network blip or 5xx during refresh is retried; a 4xx is not', async () => {
+  const { auth, posts, tick } = setup({ responses: [
+    () => { throw new TypeError('fetch failed'); },
+    { status: 503 },
+    { access_token: 'AT2', expires_in: 3600, scope: SCOPE },
+  ] });
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: 1_000_000, scope: SCOPE });
+  tick(1000);
+  assert.equal((await auth.getAccessToken([SCOPE])).accessToken, 'AT2');
+  assert.equal(posts.length, 3);
+
+  const b = setup({ responses: [{ status: 401, body: { error: 'invalid_client' } }] });
+  b.auth.setClient('cid', 'sec');
+  b.auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: 1_000_000, scope: SCOPE });
+  b.tick(1000);
+  await assert.rejects(() => b.auth.getAccessToken([SCOPE]));
+  assert.equal(b.posts.length, 1);
+});
+
+test('parallel callers share one refresh', async () => {
+  const { auth, posts, tick } = setup({ responses: [async () => { await new Promise(r => setTimeout(r, 30)); return { access_token: 'AT2', expires_in: 3600, scope: SCOPE }; }] });
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: 1_000_000, scope: SCOPE });
+  tick(1000);
+  const [a, b] = await Promise.all([auth.getAccessToken([SCOPE]), auth.getAccessToken([SCOPE])]);
+  assert.equal(a.accessToken, 'AT2');
+  assert.equal(b.accessToken, 'AT2');
+  assert.equal(posts.length, 1);
+});
+
+test('a refresh that finishes after Disconnect does not bring the tokens back', async () => {
+  let release;
+  const { auth, tick } = setup({ responses: [
+    () => new Promise(r => { release = () => r({ access_token: 'LATE', expires_in: 3600, scope: SCOPE }); }),
+  ] });
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: 1_000_000, scope: SCOPE });
+  tick(1000);
+  const p = auth.getAccessToken([SCOPE]);
+  await new Promise(r => setTimeout(r, 10));
+  await auth.disconnect(); // revoke POST uses the default response
+  release();
+  await p;
+  assert.equal(auth.status().connected, false);
+});
+
+test('two Connect clicks share one listener, and it closes', async () => {
+  const { auth, opened } = setup();
+  await Promise.all([
+    auth.connect([SCOPE], { clientId: 'cid', clientSecret: 's' }),
+    auth.connect([SCOPE], { clientId: 'cid', clientSecret: 's' }),
+  ]);
+  const ports = opened.map(u => new URL(new URL(u).searchParams.get('redirect_uri')).port);
+  assert.equal(ports[0], ports[1], 'one port');
+  auth.stop();
+  await new Promise(res => setTimeout(res, 50));
+  assert.equal(await listening(ports[0]), false);
+});
+
+test('a browser that cannot be opened closes the listener at once', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-oauth-'));
+  const auth = new DriveAuth({ file: path.join(dir, 'oauth.json'), openExternal: async () => { throw new Error('no browser'); } });
+  auth.setClient('cid', 's');
+  await assert.rejects(() => auth.connect([SCOPE]), /Could not open/);
+  assert.equal(auth.server, null);
+});
+
+test('re-entering the same client ID with a blank secret keeps the secret', () => {
+  const { auth } = setup();
+  auth.setClient('cid', 'sec');
+  auth.setClient('cid', '');
+  assert.equal(auth.settings().clientSecret, 'sec');
 });
 
 test('an unreadable oauth.json (other machine/user) reads as not connected', () => {

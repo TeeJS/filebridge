@@ -131,6 +131,7 @@ node node_modules/electron/install.js
 npm start
 ```
 
+`npm start` keeps its data in `%APPDATA%\FileBridge-dev`, apart from the installed app's.
 `npm test` runs the engine self-checks and the unit tests. Releases are built and signed
 in GitHub Actions — see [docs/RELEASING.md](docs/RELEASING.md).
 

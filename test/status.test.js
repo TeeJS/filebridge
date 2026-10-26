@@ -59,7 +59,32 @@ test('stop() writes running:false with no current run or queue', () => {
   assert.deepEqual(s.queue, []);
 });
 
-test('a failing snapshot never throws out of touch()', () => {
-  const { w } = setup(() => { throw new Error('boom'); });
-  assert.doesNotThrow(() => w.writeNow());
+test('a failing snapshot never throws, and is reported once', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-status-'));
+  const errors = [];
+  const w = createStatusWriter({ file: path.join(dir, 'status.json'), snapshot: () => { throw new Error('boom'); }, onError: e => errors.push(e) });
+  assert.doesNotThrow(() => { w.writeNow(); w.writeNow(); });
+  assert.equal(errors.length, 1);
+});
+
+test('nothing can overwrite running:false after stop()', async () => {
+  const { w, read, tick } = setup({ current: { name: 'x' } });
+  w.start();
+  w.stop();
+  tick(5000);
+  w.touch(); w.writeNow();
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(read().running, false);
+});
+
+test('a reader holding the file open only delays the write (Windows EPERM retry)', () => {
+  const { w, file, read } = setup({ n: 1 });
+  w.writeNow();
+  const realRename = fs.renameSync;
+  let failures = 2;
+  fs.renameSync = (a, b) => { if (failures-- > 0) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; } return realRename(a, b); };
+  try { w.writeNow(); } finally { fs.renameSync = realRename; }
+  assert.ok(fs.existsSync(file));
+  assert.equal(read().n, 1);
+  assert.equal(failures, -1, 'retried until the rename went through');
 });

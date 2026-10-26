@@ -12,8 +12,11 @@ const path = require('path');
 // Data folder first: %APPDATA%\FileBridge holds only FileBridge's own files (jobs, rules,
 // results, oauth.json, status). Chromium's cache/cookies go to %LOCALAPPDATA%\FileBridge\session.
 // server.js reads FILEBRIDGE_DATA_DIR at load, so this must run before it is required.
-app.setPath('userData', path.join(app.getPath('appData'), 'FileBridge'));
-app.setPath('sessionData', path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'FileBridge', 'session'));
+// A development run (`npm start`) uses FileBridge-dev, so it can never schedule the installed
+// app's real jobs (nor share its single-instance lock).
+const DATA_NAME = app.isPackaged ? 'FileBridge' : 'FileBridge-dev';
+app.setPath('userData', path.join(app.getPath('appData'), DATA_NAME));
+app.setPath('sessionData', path.join(process.env.LOCALAPPDATA || app.getPath('temp'), DATA_NAME, 'session'));
 process.env.FILEBRIDGE_DATA_DIR = app.getPath('userData');
 process.env.FILEBRIDGE_VERSION = app.getVersion(); // stamped into status.json
 
@@ -69,6 +72,9 @@ function showWindow() {
   });
   win.on('close', e => { if (!quitting) { e.preventDefault(); win.hide(); } });
   win.on('closed', () => { win = null; });
+  // Windows sign-out / restart / shutdown: Electron emits no before-quit then, so unwind here
+  // (stop the run cleanly, write running:false) and let the window close.
+  win.on('session-end', () => { quitting = true; shutdown(); });
   // The page links out (Drive folders, docs) — send those to the browser, never a new app window.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
@@ -100,10 +106,19 @@ function buildTrayMenu() {
   ]);
 }
 
+let shutDown = false;
+function shutdown() {
+  if (shutDown) return;
+  shutDown = true;
+  try { if (server && server._shutdown) server._shutdown(); } catch {}
+  if (driveAuth) driveAuth.stop();
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', showWindow);
+  // A second launch (double-click, Start menu) shows this instance's window — once it is ready.
+  app.on('second-instance', () => { app.whenReady().then(showWindow); });
 
   app.whenReady().then(() => {
     driveAuth = new DriveAuth({
@@ -123,13 +138,13 @@ if (!app.requestSingleInstanceLock()) {
     tray.on('click', showWindow);
 
     if (!START_HIDDEN) showWindow();
+  }).catch(e => {
+    // Never linger as an invisible process holding the single-instance lock.
+    dialog.showErrorBox('FileBridge could not start', String((e && e.stack) || e));
+    app.exit(1);
   });
 
   // The tray keeps the app (and its schedules) alive with no window open.
   app.on('window-all-closed', () => {});
-  app.on('before-quit', () => {
-    quitting = true;
-    try { if (server && server._shutdown) server._shutdown(); } catch {}
-    if (driveAuth) driveAuth.stop();
-  });
+  app.on('before-quit', () => { quitting = true; shutdown(); });
 }

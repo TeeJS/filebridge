@@ -2,7 +2,7 @@
 // filebridge://app/ request router, registered with protocol.handle in main.js. Replaces the
 // Bedrock Panel host's loopback HTTP server, in-process and with no socket:
 //   /index.html, /app.js          the page (allowlisted files only)
-//   /app-api/<action>             server.js handle(action, {query, body, oauth})
+//   /app-api/<action>             server.js handle(action, {query, body, oauth}) — POST only
 //   /app-host/pick-folder         native folder picker ({ok, path} | {ok:false, canceled})
 // Only the default session has the scheme, so web-drop sign-in windows (their own partitions)
 // can never reach the API.
@@ -45,6 +45,9 @@ function createRouter({ root, getServer, oauth, pickFolder, log = () => {} }) {
     const body = request.method === 'POST' ? Buffer.from(await request.arrayBuffer()) : null;
 
     const m = /^\/app-api\/([A-Za-z0-9_]{1,40})$/.exec(p);
+    // POST only: a GET (an <img src>, a link) can never trigger an action, even if some future
+    // page bug let markup in.
+    if (m && request.method !== 'POST') return json({ ok: false, error: 'POST only' }, 405);
     if (m) {
       try {
         const query = Object.fromEntries(url.searchParams);

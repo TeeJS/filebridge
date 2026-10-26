@@ -58,7 +58,10 @@ const RULES_DIR = path.join(DATA_DIR, 'rules');
 const LOG_PATH = path.join(DATA_DIR, 'log.txt');
 // One-way status feed for read-only viewers (the Bedrock Panel monitor) — see status.js.
 // Started at the bottom of this module, once the run state it reads exists.
-const statusFeed = createStatusWriter({ file: path.join(DATA_DIR, 'status.json'), snapshot: statusSnapshot });
+const statusFeed = createStatusWriter({
+  file: path.join(DATA_DIR, 'status.json'), snapshot: statusSnapshot,
+  onError: e => logLine('WARNING status.json could not be written (Bedrock Panel shows an older status until it can): ' + e.message),
+});
 
 // ── web-job rules — USER-supplied per-site instruction files. The app ships none:
 //    a web job is a pasted URL, and the URL's hostname picks the matching rule file. ──
@@ -244,9 +247,14 @@ function clearPause() { runPaused = false; pauseNow = false; wakePauseWaiters();
 let pumpStarting = false;
 
 const busy = id => (current && current.id === id) || queue.some(q => q.id === id);
+// A job whose scheduled run was still going in Bedrock Panel when it was imported (import.js):
+// it must not start here until that run has finished there.
+const HELD_MSG = 'this job is still finishing a run in Bedrock Panel (started before the import) — it runs here once that finishes';
+const isHeld = id => panelImport.heldJobs(DATA_DIR).has(id);
 
 function enqueue(id, dryRun, trigger) {
   if (busy(id)) return { ok: false, error: 'this job is already running or queued' };
+  if (isHeld(id)) return { ok: false, error: HELD_MSG };
   queue.push({ id, dryRun: !!dryRun, trigger });
   pump();
   statusFeed.touch();
@@ -259,6 +267,7 @@ async function pump() {
   const cfg = loadCfg();
   const stored = (cfg.jobs || []).find(j => j.id === next.id);
   if (!stored) { pump(); return; } // skip path re-pumps BEFORE claiming the slot — keep the latch off here
+  if (isHeld(stored.id)) { logLine(`not starting ${stored.name}: ${HELD_MSG}`); pump(); return; } // last line of defense
   pumpStarting = true; // slot claimed synchronously; released in failRun and in the run's finally
   stopFlag = false;
   runPaused = false; pauseNow = false; pauseWaiters = []; // fresh run starts un-paused
@@ -557,12 +566,14 @@ function anchor(j) {
 function nextDue(j) { return j.enabled === false ? null : sync.nextOccurrence(j.schedule, anchor(j)); }
 
 function tick() {
+  importFollowUp();
   let cfg;
   try { cfg = loadCfg(); } catch { return; }
   if (cfg.paused) return; // scheduler paused globally — manual runs still work (they don't go through tick)
   const now = Date.now();
+  const held = panelImport.heldJobs(DATA_DIR);
   for (const j of cfg.jobs || []) {
-    if (j.enabled === false || busy(j.id)) continue;
+    if (j.enabled === false || busy(j.id) || held.has(j.id)) continue;
     const due = nextDue(j);
     if (!due || due > now) continue;
     if (j.runIfMissed === false && now - due > MISSED_GRACE_MS) {
@@ -575,6 +586,25 @@ function tick() {
     enqueue(j.id, false, 'schedule');
   }
 }
+// After an import: watch Bedrock Panel's folder for a run that finished late, a jobs.json that
+// came back, and ledgers/results it still writes (import.js followUp). Skipped while a run is
+// going here, so a ledger merge never races this app's own web run.
+function importFollowUp() {
+  if (current || pumpStarting) return;
+  try {
+    const did = panelImport.followUp({
+      dataDir: DATA_DIR,
+      addToGrand: delta => {
+        const cfg = loadCfg();
+        const g = cfg.grand || (cfg.grand = { since: new Date().toISOString() });
+        for (const [k, v] of Object.entries(delta)) if (k !== 'since') g[k] = (g[k] || 0) + v;
+        saveCfg(cfg, false);
+      },
+    });
+    for (const line of did || []) logLine('import follow-up: ' + line);
+  } catch (e) { logLine('import follow-up failed: ' + e.message); }
+}
+
 const timer = setInterval(tick, 30000);
 setTimeout(tick, 3000); // catch up promptly once the module loads
 statusFeed.start();
@@ -678,7 +708,9 @@ async function handleAction(action, ctx) {
     if (current || queue.length) return { ok: false, error: 'wait for the running job to finish first' };
     try {
       const r = panelImport.runImport({ appData: APP_DATA, dataDir: DATA_DIR });
-      logLine(`imported ${r.jobs} job${r.jobs === 1 ? '' : 's'} from ${r.from} (its jobs.json is now ${path.basename(r.renamedTo)})`);
+      logLine(`imported ${r.jobs} job${r.jobs === 1 ? '' : 's'} from ${r.from} (its jobs.json is now ${path.basename(r.renamedTo)}); each job waits for its next scheduled time`);
+      for (const name of r.held) logLine(`holding ${name}: its scheduled run was still going in Bedrock Panel at the import`);
+      for (const line of r.swept || []) logLine('import follow-up: ' + line);
       return r;
     } catch (e) { return { ok: false, error: e.message }; }
   }
@@ -857,7 +889,7 @@ async function handleAction(action, ctx) {
     const cfg = loadCfg();
     let queued = 0;
     for (const j of cfg.jobs || []) {
-      if (!ids.includes(j.id) || busy(j.id)) continue;
+      if (!ids.includes(j.id) || busy(j.id) || isHeld(j.id)) continue;
       queue.push({ id: j.id, dryRun: false, trigger: 'manual' });
       queued++;
     }
@@ -870,7 +902,7 @@ async function handleAction(action, ctx) {
     const cfg = loadCfg();
     let queued = 0;
     for (const j of cfg.jobs || []) {
-      if (j.enabled === false || busy(j.id)) continue;
+      if (j.enabled === false || busy(j.id) || isHeld(j.id)) continue;
       queue.push({ id: j.id, dryRun: false, trigger: 'manual' });
       queued++;
     }
@@ -1012,6 +1044,10 @@ async function handleAction(action, ctx) {
   return { ok: false, error: 'unknown action' };
 }
 
+function urlForStatus(u) {
+  try { const x = new URL(u); return x.origin + x.pathname; } catch { return ''; }
+}
+
 // status.json body (contract v1 in status.js / PROJECT.md). Job metadata and run state only —
 // never secrets, tokens, cookies, or rule contents. Read-only viewers render it as-is.
 function statusSnapshot() {
@@ -1025,7 +1061,10 @@ function statusSnapshot() {
     cur = {
       id: current.id, name: current.name, kind: current.kind, dryRun: current.dryRun, trigger: current.trigger,
       startedAt: new Date(current.startedAt).toISOString(), phase: current.phase,
-      source: current.source, dest: current.dest, file: p.rel || null, op: p.op || null, reason: p.reason || null,
+      // A web job's source is its pasted URL: keep only origin + path, in case the query
+      // carries a signed or tokenised parameter.
+      source: current.kind === 'web' ? urlForStatus(current.source) : current.source,
+      dest: current.dest, file: p.rel || null, op: p.op || null, reason: p.reason || null,
       scanned: p.scanned || 0, foldersScanned: p.foldersScanned || 0, listing: !!p.listing,
       filesDone: p.done || 0, filesTotal: p.total || 0,
       bytesDone: p.bytes || 0, bytesTotal: current.totalBytes || 0,
@@ -1038,6 +1077,7 @@ function statusSnapshot() {
     };
   }
   const last = slim();
+  const held = panelImport.heldJobs(DATA_DIR);
   return {
     appVersion: process.env.FILEBRIDGE_VERSION || null,
     paused: !!cfg.paused,
@@ -1047,7 +1087,7 @@ function statusSnapshot() {
       const r = last[j.id];
       return {
         id: j.id, name: j.name, kind: j.kind === 'web' ? 'web' : (j.driveApi ? 'drive' : 'folder'),
-        enabled: j.enabled !== false, nextRunAt: nextDue(j),
+        enabled: j.enabled !== false, nextRunAt: nextDue(j), held: held.has(j.id),
         lastRun: j.lastRun ? { at: j.lastRun.at, ok: !!j.lastRun.ok, copied: j.lastRun.copied || 0, deleted: j.lastRun.deleted || 0,
           errors: j.lastRun.errors || 0, warnings: j.lastRun.warnings || 0, ms: j.lastRun.ms || 0, bytes: (r && !r.dryRun && r.at === j.lastRun.at) ? (r.bytes || 0) : null } : null,
       };

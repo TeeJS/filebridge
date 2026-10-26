@@ -13,11 +13,10 @@ async function requestJson(url, opts) {
   if (result) return result;
   throw new Error(response.ok ? 'FileBridge returned an empty response' : `FileBridge returned HTTP ${response.status}`);
 }
+// Always POST: the app refuses API calls by any other method, so a stray <img src> or link
+// can never trigger an action.
 function api(action, body) {
-  const opts = body
-    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    : undefined;
-  return requestJson('/app-api/' + action, opts);
+  return requestJson('/app-api/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 }
 function msg(t, cls) { const m = $('#msg'); m.textContent = t || ''; m.className = cls || ''; }
 
@@ -252,9 +251,10 @@ function renderImportBand() {
   band.hidden = !importOffer || importLater;
   if (band.hidden) return;
   const n = importOffer.jobs;
+  const seen = importOffer.lastActivity ? ' (it last wrote anything ' + esc(fmtAgo(importOffer.lastActivity)) + ')' : '';
   $('#importBody').innerHTML = 'Bedrock Panel\'s FileBridge has <b>' + n + ' job' + (n === 1 ? '' : 's') + '</b>. ' +
     'Import moves ' + (n === 1 ? 'it' : 'them') + ' here with stats, filters, rules and history, and Bedrock Panel stops running ' + (n === 1 ? 'it' : 'them') + '. ' +
-    'Make sure nothing is running there first.';
+    'Best when nothing is running there' + seen + '. Google Drive and web-drop sites need signing in again here.';
   $('#importGo').textContent = 'Import ' + n + ' job' + (n === 1 ? '' : 's');
 }
 $('#importLater').addEventListener('click', () => { importLater = true; renderImportBand(); });
@@ -262,7 +262,8 @@ $('#importGo').addEventListener('click', async () => {
   $('#importGo').disabled = true;
   try {
     const r = await api('importFromPanel', {});
-    msg(r.ok ? 'Imported ' + r.jobs + ' job' + (r.jobs === 1 ? '' : 's') + ' from Bedrock Panel. Google Drive and web-drop sites need signing in again here.' : r.error, r.ok ? 'info' : 'bad');
+    msg(r.ok ? 'Imported ' + r.jobs + ' job' + (r.jobs === 1 ? '' : 's') + ' from Bedrock Panel; each runs at its next scheduled time.' +
+      (r.held && r.held.length ? ' ' + r.held.join(', ') + ' is still finishing a run in Bedrock Panel and starts here after that.' : '') : r.error, r.ok ? 'info' : 'bad');
     await refreshList();
   } finally { $('#importGo').disabled = false; }
 });
