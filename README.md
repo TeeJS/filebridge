@@ -1,4 +1,4 @@
-# FileBridge (`file-bridge`)
+# FileBridge
 
 Bring files together from **local folders, Google Drive, and subscription sites**
 into local folders, on a schedule. FileBridge is a from-scratch folder-replicator
@@ -7,9 +7,32 @@ change-only copying, mirror deletions, dated backups, filter groups, and a full
 live progress band — plus two things those tools never had: a **Google Drive API**
 source and **subscription-site "web-drop"** downloads.
 
-It runs on all three surfaces — the 1920×480 **panel**, the **editor** job-manager
-embed, and a **pop-out window** — and every job type shares one run engine, one
+FileBridge is a Windows desktop app. Close its window and it keeps running in the
+**tray**, so schedules fire without the window open; **Start with Windows** (tray
+menu) keeps them running after a reboot. Every job type shares one run engine, one
 schedule model, and one live progress/result view.
+
+## Install
+
+Download `filebridge-setup-<version>.exe` from
+[Releases](https://github.com/TeeJS/filebridge/releases) and run it. The installer is
+signed (Azure Trusted Signing) and installs per-user — no administrator rights.
+
+## Moving from Bedrock Panel
+
+FileBridge used to be a Bedrock Panel app (versions up to 1.7.x). On first start,
+FileBridge finds those jobs and offers **Import**: your jobs, stats, filter groups,
+rule files, seen-ledgers, results and log come across, and Bedrock Panel stops running
+them (its `jobs.json` is renamed `jobs.migrated-<date-time>.json`; nothing is deleted).
+Make sure nothing is running in Bedrock Panel's FileBridge before you import. Two things
+need doing again in the new app:
+
+- **Google Drive:** click **Change client…** (or **Set up…**) on the Google Drive chip,
+  paste your OAuth client ID and secret, and connect.
+- **Web-drop sites:** sign in once per site from the **Accounts** strip.
+
+Bedrock Panel's FileBridge page then becomes a **read-only monitor** of this app (live
+run, next runs, last results) once you update it with **Check for updates**.
 
 ## Three kinds of job
 
@@ -66,25 +89,51 @@ API** (not the local mount).
 ## Setup
 
 1. **Add job** → choose the type, then set the pieces:
-   - **Folder / Google Drive:** pick the **source** and **destination** folders (the
-     panel's native folder picker), the compare criteria, any filters, and a schedule.
+   - **Folder / Google Drive:** pick the **source** and **destination** folders
+     (**Browse…**), the compare criteria, any filters, and a schedule.
      For a Drive job, paste the Drive **folder link** as the source and turn on
      **read via the Drive API**.
    - **Web-drop:** add a **rule file** under **Rules**, paste the site's listing URL,
      then sign in when prompted.
-2. **Connect Google Drive** (Drive jobs only) — FileBridge manages its **own** Google
-   sign-in (read-only Drive scope) from the **Accounts** strip / editor, so no
-   host-wide Google account is required. Connect once; it's reused on every run.
+2. **Connect Google Drive** (Drive jobs only) — from the Google Drive chip in the
+   **Accounts** strip: create an OAuth client of type **Desktop app** in Google Cloud
+   Console, paste its ID and secret, and approve in your browser (read-only Drive
+   scope). Connect once; it's reused on every run.
 
 ## Notes
 
-- **Jobs live in** `%APPDATA%\bedrock-panel\file-bridge\jobs.json` — copy that file to
-  move all your jobs (and their stats) to another machine.
+- **Jobs live in** `%APPDATA%\FileBridge\jobs.json` — copy that file to move all your
+  jobs (and their stats) to another machine. The Google Drive sign-in
+  (`oauth.json`) is encrypted for your Windows account and does not move; connect again
+  on the new machine.
+- **Status for other apps:** FileBridge writes `%APPDATA%\FileBridge\status.json`
+  (current run, queue, per-job next/last run, grand totals; no secrets) at most once a
+  second while something changes and every 30 seconds otherwise. Bedrock Panel's
+  monitor reads it.
+- **No network listener.** The window talks to the engine in-process. The only port
+  FileBridge ever opens is the Google sign-in callback on `127.0.0.1`, and only while
+  you are connecting Drive.
 - **Read-only on the source.** FileBridge reads the source and writes only the
   destination; it never modifies or deletes anything on the source side.
 - The **Drive connection is read-only** (`drive.readonly`) — FileBridge can read and
   download, never change your Drive.
 - **Google-native docs** with no export produce no file — they're reported as
   **skips**, not errors, exactly like the local mount.
-- After updating the app, **restart Bedrock Panel**: `server.js` changes only load with
-  the host process.
+
+## Building
+
+Node 26 (`.nvmrc`), Windows, and the Visual Studio C++ build tools (for the small DPAPI
+module).
+
+```powershell
+npm install --ignore-scripts
+node node_modules/electron/install.js
+npm start
+```
+
+`npm test` runs the engine self-checks and the unit tests. Releases are built and signed
+in GitHub Actions — see [docs/RELEASING.md](docs/RELEASING.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

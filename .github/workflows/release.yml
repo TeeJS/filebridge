@@ -1,0 +1,133 @@
+name: Release
+
+# Two ways to run it:
+#   - Actions tab -> Release -> "Run workflow" (a DRY RUN by default): tests, builds and signs
+#     Windows (Azure Artifact Signing) and keeps the result as a workflow artifact. No release.
+#   - Push a tag vX.Y.Z (matching package.json "version"): the same build, then a DRAFT release
+#     with the installer attached and release-notes/vX.Y.Z.md as its notes. Publish by hand.
+#
+# Windows signs through the 'release' environment (variables AZURE_CLIENT_ID, AZURE_TENANT_ID,
+# AZURE_SUBSCRIPTION_ID; OIDC, no stored secret). Copied from faction-wars-editor; see
+# docs/RELEASING.md. FileBridge v2 is Windows-only.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and sign only (no release)
+        type: boolean
+        default: true
+      tag:
+        description: Tag for the draft release when not a dry run (e.g. v2.0.0)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      SIGNING_ENDPOINT: https://eus.codesigning.azure.net/
+      SIGNING_ACCOUNT: openquakesigning
+      SIGNING_PROFILE: openquake-public
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # The signing library runs on .NET 8.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Signing library and metadata (pinned, verified)
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\signing-client.zip"
+          Invoke-WebRequest 'https://api.nuget.org/v3-flatcontainer/microsoft.trusted.signing.client/1.0.95/microsoft.trusted.signing.client.1.0.95.nupkg' -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '3bfcf1e0a3cb42af1692f0a8ed45c15de070c2de86f28a59b2795d904d8a920f') { throw "signing client package hash mismatch: $hash" }
+          Expand-Archive $zip "$env:RUNNER_TEMP\signing-client"
+          New-Item -ItemType Directory -Force .signing\dlib-x64 | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\signing-client\bin\x64\*" .signing\dlib-x64\ -Recurse
+          # Only the Azure CLI login that azure/login just made; every other credential
+          # type is excluded so nothing else is tried (Microsoft's documented OIDC setup).
+          $meta = [ordered]@{
+            Endpoint = $env:SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:SIGNING_ACCOUNT
+            CertificateProfileName = $env:SIGNING_PROFILE
+            ExcludeCredentials = @('EnvironmentCredential', 'WorkloadIdentityCredential', 'ManagedIdentityCredential',
+              'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential')
+          }
+          [IO.File]::WriteAllText("$PWD\.signing\metadata.json", ($meta | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+      - run: npm ci
+      - name: Build the DPAPI module
+        run: node build-dpapi.js
+      - name: Tests
+        run: npm test
+      - name: Package and sign
+        run: npx electron-builder --win --publish never
+      # sign.js leaves a file unsigned (with a warning) when its setup is missing, so
+      # this is what proves the build is signed - checked on the files, not the log.
+      - name: Verify every binary is signed
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist -Filter *.exe | Where-Object { $_.Name -notlike '*__uninstaller*' })
+          $files += Get-Item 'dist\win-unpacked\FileBridge.exe'
+          $files += Get-Item 'dist\win-unpacked\resources\app.asar.unpacked\shell\native\filebridge_dpapi.node'
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            if ($s.Status -ne 'Valid') { throw "$($f.Name) is not validly signed: $($s.Status) $($s.StatusMessage)" }
+            "signed  $($f.Name)  ($($s.SignerCertificate.Subject))"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+          if-no-files-found: error
+
+  draft:
+    needs: [windows]
+    if: github.event_name == 'push' || inputs.dry_run == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$version" ]; then
+            echo "::error::Tag $TAG does not match package.json version $version."
+            exit 1
+          fi
+          notes="release-notes/$TAG.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::$notes is missing - write (and get approval for) the release notes first."
+            exit 1
+          fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "FileBridge $TAG" \
+            --notes-file "$notes" artifacts/*

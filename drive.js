@@ -2,8 +2,8 @@
 // Google Drive API source for folder jobs (opt-in per job "driveApi"): the source folder
 // is read through the Drive REST API instead of the local Drive for Desktop mount. The
 // mount HIDES other members' files in some shared folders (verified on a real vault) —
-// the API sees everything the signed-in account can see. The host owns the OAuth tokens
-// (app.json `oauth` block, ctx.oauth in server.js); this module only ever receives a
+// the API sees everything the signed-in account can see. shell/oauth.js owns the OAuth
+// tokens (ctx.oauth in server.js); this module only ever receives a
 // getToken() closure so refreshed tokens are picked up mid-run. Read-only scope: this
 // module can never modify, delete, or upload anything in Drive.
 

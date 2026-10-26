@@ -48,7 +48,13 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "signExts": [
+        ".node"
+      ],
+      "signtoolOptions": {
+        "sign": "./sign.js"
+      }
     },
     "nsis": {
       "oneClick": false,

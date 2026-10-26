@@ -10,13 +10,13 @@ const os = require('os');
 const path = require('path');
 const sync = require('./sync');
 const drive = require('./drive');
-const manifest = require('./app.json');
+const pkg = require('./package.json');
 
-// ── host integration contract ──
-assert.equal(manifest.id, 'file-bridge');
-assert.equal(manifest.served, true);
-assert.deepEqual(manifest.editor, { entry: 'index.html', label: 'Manage sync jobs' });
-assert(Array.isArray(manifest.hostCapabilities) && manifest.hostCapabilities.includes('pick-folder'));
+// ── standalone app contract: every runtime module ships in the installer ──
+assert.equal(pkg.main, 'main.js');
+for (const f of ['main.js', 'server.js', 'status.js', 'import.js', 'sync.js', 'drive.js', 'web.js', 'app.js', 'index.html']) {
+  assert(pkg.build.files.includes(f), f + ' is packaged');
+}
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'file-bridge-test-'));
 const SRC = path.join(ROOT, 'src');
@@ -1046,7 +1046,7 @@ async function run(j) {
     // sanitize: Drive names with characters Windows can't hold -> a space each (Drive-for-Desktop parity)
     assert.equal(drive.sanitizeName('Ren: der*?.zip'), 'Ren  der  .zip');
     assert.equal(drive.sanitizeName('dots...'), 'dots');
-    assert.equal(manifest.oauth.scopes[0], 'https://www.googleapis.com/auth/drive.readonly', 'manifest asks for read-only Drive access');
+    assert.deepEqual(drive.SCOPES, ['https://www.googleapis.com/auth/drive.readonly'], 'asks for read-only Drive access only');
     // Stop aborts an IN-FLIGHT download (not just between files): a never-ending stream is
     // cut when the stop flag flips, and the run ends stopped with no error.
     reset(); fs.mkdirSync(DST, { recursive: true });
