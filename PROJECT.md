@@ -1,6 +1,7 @@
 # FileBridge standalone — project charter
 
-Status: APPROVED 2026-10-26. Step 1 (repo) done, committed locally at 664dab1. No remote yet.
+Status: APPROVED 2026-10-26. Steps 1 (repo) and 2 (shell) done, committed locally (latest fd4c585).
+No remote yet.
 
 FileBridge (today: the `file-bridge` drop-in, v1.7.4, in TeeJS/bedrock-panel at
 `community-apps/file-bridge/`) becomes its own signed Windows Electron app. Bedrock Panel keeps a
@@ -55,7 +56,7 @@ supplies each one:
 |---|---|
 | `/app-api/<action>` HTTP route to `server.js` `handle()` | A privileged `filebridge://` protocol registered with `protocol.handle`. The page's existing `fetch('/app-api/...')` calls resolve against it, in-process. **No socket.** |
 | `/app-host/pick-folder` | The same protocol route, answered with `dialog.showOpenDialog` |
-| `ctx.oauth` (status / connect / disconnect / getAccessToken) | Port `src/auth/oauth-handler.js` and `token-storage.js` (MIT) with one Google provider. Tokens and the client secret are encrypted with Electron `safeStorage`. |
+| `ctx.oauth` (status / connect / disconnect / getAccessToken) | Port `src/auth/oauth-handler.js` and `token-storage.js` (MIT) with one Google provider. Tokens and the client secret are encrypted with raw Windows DPAPI, using Bedrock Panel's own binding (changed from `safeStorage` in step 2: the Panel found safeStorage's key didn't survive across launches). |
 | Serve the page plus `serverAutoStart` | `BrowserWindow` loads `filebridge://app/index.html`, and `main.js` loads `server.js` at startup so schedules arm immediately |
 
 The Electron calls FileBridge already makes directly (`BrowserWindow` for sign-in windows,
@@ -119,9 +120,12 @@ The Electron calls FileBridge already makes directly (`BrowserWindow` for sign-i
 
 1. **Repo:** create `D:\Github\filebridge` from the drop-in's history (`git subtree split`). Add an
    Electron 44 + electron-builder skeleton, the same versions Bedrock Panel uses.
-2. **Shell:** `main.js` with single-instance lock, tray icon (closing the window keeps the
-   scheduler running), the `filebridge://` protocol, folder picker, OAuth port and login item.
-3. **De-host edits:** items 1–3 above. `test.js` carries over and must pass.
+2. **Shell:** move `DATA_DIR` first (edit 1's data-folder half), so the engine can never load
+   against the Panel's jobs. Then `main.js` with single-instance lock, tray icon (closing the
+   window keeps the scheduler running), the `filebridge://` protocol, folder picker, OAuth port and
+   login item. Chromium's cache and cookies go to `%LOCALAPPDATA%\FileBridge\session`, so
+   `%APPDATA%\FileBridge` holds only FileBridge's own files.
+3. **De-host edits:** the rest of items 1–3 above. `test.js` carries over and must pass.
 4. **status.json and import:** with new `node:test` coverage (writer, schema, heartbeat,
    import plus tombstone).
 5. **Adversarial review** of the shell, import and status writer, as every FileBridge release has
