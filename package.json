@@ -32,6 +32,8 @@
       "shell/native/filebridge_dpapi.node",
       "assets/icon.png",
       "server.js",
+      "status.js",
+      "import.js",
       "sync.js",
       "drive.js",
       "web.js",

@@ -154,8 +154,12 @@
   .runcounts b { color: var(--text); }
 
   /* Last-run results band */
-  #lastband { flex: none; display: flex; align-items: center; gap: 16px; padding: 10px 32px;
+  #lastband, #importBand { flex: none; display: flex; align-items: center; gap: 16px; padding: 10px 32px;
               border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  #importBand[hidden] { display: none; }
+  #importBody { min-width: 0; flex: 1; font-size: 14px; color: var(--muted); }
+  #importBody b { color: var(--text); }
+  #importBand button { min-height: 36px; padding: 0 14px; }
   #bandBody { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px 18px;
               flex-wrap: wrap; font-size: 14px; color: var(--muted); }
   #bandBody b { color: var(--text); }
@@ -297,7 +301,8 @@
   html[data-layout=window] .list-scroll,
   html[data-layout=window] .vbody { padding: 16px 20px 24px; }
   html[data-layout=window] #runbar { padding: 12px 20px; }
-  html[data-layout=window] #lastband { padding: 8px 20px; }
+  html[data-layout=window] #lastband,
+  html[data-layout=window] #importBand { padding: 8px 20px; }
   html[data-layout=window] #bandBody { font-size: 13px; }
   /* Flow the document naturally and make header/footer sticky so Back and Save are ALWAYS
      visible, whatever the window size. */
@@ -413,6 +418,12 @@
   <!-- Last-run results band (Karen's auto-shown Last Run panel): the newest finished run's
        numbers, visible on the main view without opening the result detail. Dismissible;
        reappears when a newer run finishes. -->
+  <!-- First run after moving from Bedrock Panel: bring the drop-in's jobs over (import.js). -->
+  <div id="importBand" hidden>
+    <div id="importBody"></div>
+    <button id="importGo" class="primary">Import jobs</button>
+    <button id="importLater">Not now</button>
+  </div>
   <div id="lastband" hidden>
     <div id="bandBody"></div>
     <button id="bandDetails">Details</button>

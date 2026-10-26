@@ -20,6 +20,7 @@ const sync = require('./sync');
 const web = require('./web');
 const drive = require('./drive');
 const { createStatusWriter } = require('./status');
+const panelImport = require('./import');
 
 // main.js hands ctx.oauth (the Google Drive sign-in) with every handle() call, and once
 // at startup, so scheduled Drive-API runs work before the window is opened.
@@ -49,7 +50,8 @@ async function diskInfo(p) {
 
 // main.js passes its own data folder (%APPDATA%\FileBridge) before loading this module. Never the
 // Bedrock Panel drop-in's folder: two schedulers on one jobs.json would run every job twice.
-const DATA_DIR = process.env.FILEBRIDGE_DATA_DIR || path.join(process.env.APPDATA || os.homedir(), 'FileBridge');
+const APP_DATA = process.env.APPDATA || os.homedir();
+const DATA_DIR = process.env.FILEBRIDGE_DATA_DIR || path.join(APP_DATA, 'FileBridge');
 const JOBS_PATH = path.join(DATA_DIR, 'jobs.json');
 const FILTERS_PATH = path.join(DATA_DIR, 'filters.json');
 const RULES_DIR = path.join(DATA_DIR, 'rules');
@@ -622,8 +624,11 @@ async function handleAction(action, ctx) {
     // (or so the user can set it up). status() is host-side and cheap.
     let driveInfo = { available: false, configured: false, connected: false };
     try { if (hostOauth) driveInfo = { available: true, ...(await hostOauth.status()) }; } catch {}
+    // First run after moving from Bedrock Panel: offer to bring the drop-in's jobs over.
+    let importOffer = null;
+    try { importOffer = panelImport.findImport({ appData: APP_DATA, dataDir: DATA_DIR }); } catch {}
     return {
-      ok: true, jobs, grand: cfg.grand || null, dataDir: DATA_DIR, current, queue: queue.map(q => q.id),
+      ok: true, jobs, grand: cfg.grand || null, dataDir: DATA_DIR, current, queue: queue.map(q => q.id), importOffer,
       rules: Object.values(rules).map(r => ({ site: r.site, name: r.name || r.site, match: r.match })),
       sessions, lastResults: slim(), drive: driveInfo, paused: !!cfg.paused, logCats: logCats(cfg),
     };
@@ -665,6 +670,17 @@ async function handleAction(action, ctx) {
     if (!hostOauth) return { ok: false, error: 'the host OAuth bridge is not available' };
     try { await hostOauth.disconnect(); return { ok: true }; }
     catch (e) { return { ok: false, error: e.message }; }
+  }
+
+  // Import from the Bedrock Panel drop-in (import.js): the drop-in's jobs.json is renamed away
+  // before ours is written, so its scheduler stops before ours starts.
+  if (action === 'importFromPanel') {
+    if (current || queue.length) return { ok: false, error: 'wait for the running job to finish first' };
+    try {
+      const r = panelImport.runImport({ appData: APP_DATA, dataDir: DATA_DIR });
+      logLine(`imported ${r.jobs} job${r.jobs === 1 ? '' : 's'} from ${r.from} (its jobs.json is now ${path.basename(r.renamedTo)})`);
+      return r;
+    } catch (e) { return { ok: false, error: e.message }; }
   }
 
   if (action === 'status') { let paused = false; try { paused = !!loadCfg().paused; } catch {} return { ok: true, current, queue: queue.map(q => q.id), lastResults: slim(), log: logTail.slice(-120), paused }; }

@@ -237,11 +237,35 @@ async function refreshList() {
   current = r.current; queueIds = r.queue || []; lastResults = r.lastResults || {};
   for (const id of [...selected]) if (!jobs.some(j => j.id === id)) selected.delete(id); // drop deleted jobs
   $('#dataDir').textContent = r.dataDir || '';
+  importOffer = r.importOffer || null;
   render();
   renderGrand();
   renderLastBand();
+  renderImportBand();
   renderSites();
 }
+
+// ── import from the Bedrock Panel drop-in (first run after the move) ──────────
+let importOffer = null, importLater = false;
+function renderImportBand() {
+  const band = $('#importBand');
+  band.hidden = !importOffer || importLater;
+  if (band.hidden) return;
+  const n = importOffer.jobs;
+  $('#importBody').innerHTML = 'Bedrock Panel\'s FileBridge has <b>' + n + ' job' + (n === 1 ? '' : 's') + '</b>. ' +
+    'Import moves ' + (n === 1 ? 'it' : 'them') + ' here with stats, filters, rules and history, and Bedrock Panel stops running ' + (n === 1 ? 'it' : 'them') + '. ' +
+    'Make sure nothing is running there first.';
+  $('#importGo').textContent = 'Import ' + n + ' job' + (n === 1 ? '' : 's');
+}
+$('#importLater').addEventListener('click', () => { importLater = true; renderImportBand(); });
+$('#importGo').addEventListener('click', async () => {
+  $('#importGo').disabled = true;
+  try {
+    const r = await api('importFromPanel', {});
+    msg(r.ok ? 'Imported ' + r.jobs + ' job' + (r.jobs === 1 ? '' : 's') + ' from Bedrock Panel. Google Drive and web-drop sites need signing in again here.' : r.error, r.ok ? 'info' : 'bad');
+    await refreshList();
+  } finally { $('#importGo').disabled = false; }
+});
 
 // ── accounts strip (web-site sign-ins + Google Drive) ─────────────────────────
 // Lives at the BOTTOM of the main view and stays HIDDEN while everything is healthy —
