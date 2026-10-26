@@ -590,6 +590,18 @@ async function run(j) {
     assert.equal(sj.stats.runs, 1, 'lifetime stats accumulate');
     assert.equal(sj.stats.copied, 1);
     assert(lr.grand && lr.grand.runs >= 1, 'grand totals accumulate');
+    // status.json (the Panel monitor's feed): written after the run, v1 shape, no run left over
+    await new Promise(rs => setTimeout(rs, 1100)); // past the 1 s write throttle
+    const statusFile = path.join(ROOT, 'appdata', 'FileBridge', 'status.json');
+    const sf = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+    assert.equal(sf.schema, 1, 'status.json schema');
+    assert.equal(sf.running, true, 'status.json says running');
+    assert.equal(sf.current, null, 'no run in progress after it finished');
+    const sfj = sf.jobs.find(x => x.id === jid);
+    assert(sfj && sfj.lastRun && sfj.lastRun.ok && sfj.lastRun.copied === 1, 'status.json carries the last run');
+    assert.equal(sfj.lastRun.bytes, 1, 'status.json carries the last run bytes');
+    assert(sf.grand && sf.grand.runs >= 1, 'status.json carries grand totals');
+    assert(Date.now() - Date.parse(sf.heartbeatAt) < 60000, 'fresh heartbeat');
     // a stale client snapshot echoed through save must not clobber server-side stats
     const echo = await call('save', { job: { ...sj, stats: { runs: 999 } } });
     assert(echo.ok, echo.error);
@@ -708,6 +720,10 @@ async function run(j) {
     fs.rmSync(path.join(fdir, 'filters.json'), { force: true });
   } finally {
     server._shutdown();
+  }
+  {
+    const sf = JSON.parse(fs.readFileSync(path.join(ROOT, 'appdata', 'FileBridge', 'status.json'), 'utf8'));
+    assert.equal(sf.running, false, 'shutdown writes running:false');
   }
 
   // ── mirror source timestamps (opt-in mirrorMeta): file atime + folder mtime, applied

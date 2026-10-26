@@ -15,6 +15,7 @@ const path = require('path');
 app.setPath('userData', path.join(app.getPath('appData'), 'FileBridge'));
 app.setPath('sessionData', path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'FileBridge', 'session'));
 process.env.FILEBRIDGE_DATA_DIR = app.getPath('userData');
+process.env.FILEBRIDGE_VERSION = app.getVersion(); // stamped into status.json
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'filebridge', privileges: { standard: true, secure: true, supportFetchAPI: true } },

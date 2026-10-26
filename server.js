@@ -19,6 +19,7 @@ const path = require('path');
 const sync = require('./sync');
 const web = require('./web');
 const drive = require('./drive');
+const { createStatusWriter } = require('./status');
 
 // main.js hands ctx.oauth (the Google Drive sign-in) with every handle() call, and once
 // at startup, so scheduled Drive-API runs work before the window is opened.
@@ -53,6 +54,9 @@ const JOBS_PATH = path.join(DATA_DIR, 'jobs.json');
 const FILTERS_PATH = path.join(DATA_DIR, 'filters.json');
 const RULES_DIR = path.join(DATA_DIR, 'rules');
 const LOG_PATH = path.join(DATA_DIR, 'log.txt');
+// One-way status feed for read-only viewers (the Bedrock Panel monitor) — see status.js.
+// Started at the bottom of this module, once the run state it reads exists.
+const statusFeed = createStatusWriter({ file: path.join(DATA_DIR, 'status.json'), snapshot: statusSnapshot });
 
 // ── web-job rules — USER-supplied per-site instruction files. The app ships none:
 //    a web job is a pasted URL, and the URL's hostname picks the matching rule file. ──
@@ -153,6 +157,7 @@ function saveCfg(cfg, backup) {
   const tmp = `${JOBS_PATH}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
   fs.renameSync(tmp, JOBS_PATH);
+  statusFeed.touch(); // jobs, lastRun, stats, or the scheduler pause changed
 }
 
 // ── persisted run results (full detail per job, survives restarts/updates) ────
@@ -242,6 +247,7 @@ function enqueue(id, dryRun, trigger) {
   if (busy(id)) return { ok: false, error: 'this job is already running or queued' };
   queue.push({ id, dryRun: !!dryRun, trigger });
   pump();
+  statusFeed.touch();
   return { ok: true };
 }
 
@@ -260,6 +266,7 @@ async function pump() {
     pumpStarting = false; // release the slot before re-pumping the queue
     lastResults[stored.id] = { at: new Date().toISOString(), ms: 0, ok: false, dryRun: next.dryRun, trigger: next.trigger, fatal: msg, errors: [], errorCount: 1, actions: [], kind: stored.kind === 'web' ? 'web' : undefined, webDownloaded: [], wouldDownload: [], skippedSeen: 0, collectionsVisited: 0, bytes: 0 };
     saveResult(stored.id, lastResults[stored.id]);
+    statusFeed.touch();
     logLine(`${next.dryRun ? 'preview' : 'run'} ${stored.name} (${next.trigger}): FAILED — ${msg}`);
     if (!next.dryRun) {
       const fresh = loadCfg();
@@ -333,6 +340,7 @@ async function pump() {
   if (stored.kind !== 'web') { try { resolveFilters(job); } catch (e) { failRun('filter groups could not be resolved: ' + e.message); return; } }
   current = { id: job.id, name: job.name, kind: stored.kind === 'web' ? 'web' : 'folder', source: stored.kind === 'web' ? job.url : job.source, dest: job.dest, dryRun: next.dryRun, trigger: next.trigger, phase: 'scan', progress: {}, tally: { copy: 0, same: 0, filtered: 0 }, paused: false, pausedActive: false, pauseMode: null, disk: null, startedAt: Date.now() };
   const t0 = Date.now();
+  statusFeed.touch();
   diskInfo(job.dest).then(d => { if (current && current.id === job.id) current.disk = d; }); // async — non-blocking
   // Live free space: refresh the destination's free/total every few seconds so a long run's
   // disk bar tracks reality instead of the value captured at start.
@@ -378,6 +386,7 @@ async function pump() {
       }
       current.phase = p.phase;
       current.progress = p;
+      statusFeed.touch(); // throttled to one write a second
     },
     trash,
   };
@@ -394,8 +403,8 @@ async function pump() {
       job.site = rule.site; // partition + display identity comes from the matched rule
       const w = await web.runWebJob(job, rule, {
         dataDir: DATA_DIR, dryRun: next.dryRun, log: logLine,
-        setPhase: (phase, detail) => { if (current) { current.phase = 'web'; current.progress = { phase: 'web', webPhase: phase, detail: detail || '' }; } },
-        setCounts: c => { if (current) current.webCounts = c; },
+        setPhase: (phase, detail) => { if (current) { current.phase = 'web'; current.progress = { phase: 'web', webPhase: phase, detail: detail || '' }; statusFeed.touch(); } },
+        setCounts: c => { if (current) { current.webCounts = c; statusFeed.touch(); } },
         shouldStop: () => stopFlag,
       });
       // Shaped like a folder summary so the band, rows, stats, and grand totals all work:
@@ -529,6 +538,7 @@ async function pump() {
     pumpStarting = false; // release the run slot so the next queued job can start
     clearPause(); // never let a pause flag linger past the run it belonged to
     pump();
+    statusFeed.touch();
   }
 }
 
@@ -565,9 +575,16 @@ function tick() {
 }
 const timer = setInterval(tick, 30000);
 setTimeout(tick, 3000); // catch up promptly once the module loads
+statusFeed.start();
 
 // ── API ───────────────────────────────────────────────────────────────────────
+// The page polls these every second / 30 s; they change nothing, so they don't touch the feed.
+const READ_ONLY_ACTIONS = new Set(['list', 'status', 'result', 'rules', 'filters', 'sched', 'cron', 'resolveLink', 'resolveRule']);
 exports.handle = async function handle(action, ctx) {
+  try { return await handleAction(action, ctx); }
+  finally { if (!READ_ONLY_ACTIONS.has(action)) statusFeed.touch(); } // stop / pause / resume etc.
+};
+async function handleAction(action, ctx) {
   const body = ctx && ctx.body ? JSON.parse(ctx.body.toString('utf8') || '{}') : {};
   if (ctx && ctx.oauth) hostOauth = ctx.oauth; // captured for scheduled Drive-API runs
 
@@ -977,7 +994,51 @@ exports.handle = async function handle(action, ctx) {
   }
 
   return { ok: false, error: 'unknown action' };
-};
+}
+
+// status.json body (contract v1 in status.js / PROJECT.md). Job metadata and run state only —
+// never secrets, tokens, cookies, or rule contents. Read-only viewers render it as-is.
+function statusSnapshot() {
+  const cfg = loadCfg();
+  const jobs = cfg.jobs || [];
+  const nameOf = id => { const j = jobs.find(x => x.id === id); return j ? j.name : id; };
+  let cur = null;
+  if (current) {
+    const p = current.progress || {};
+    const elapsed = Math.max(1, Date.now() - current.startedAt);
+    cur = {
+      id: current.id, name: current.name, kind: current.kind, dryRun: current.dryRun, trigger: current.trigger,
+      startedAt: new Date(current.startedAt).toISOString(), phase: current.phase,
+      source: current.source, dest: current.dest, file: p.rel || null, op: p.op || null, reason: p.reason || null,
+      scanned: p.scanned || 0, foldersScanned: p.foldersScanned || 0, listing: !!p.listing,
+      filesDone: p.done || 0, filesTotal: p.total || 0,
+      bytesDone: p.bytes || 0, bytesTotal: current.totalBytes || 0,
+      fileBytes: p.fileBytes || 0, fileTotal: p.fileTotal || 0,
+      rateBps: current.phase === 'run' && p.bytes ? Math.round(p.bytes / (elapsed / 1000)) : 0,
+      tally: current.tally || null, errors: p.errCount || 0,
+      paused: !!current.paused, pausedActive: !!current.pausedActive,
+      web: current.kind === 'web' ? { phase: p.webPhase || null, detail: p.detail || '', counts: current.webCounts || null } : null,
+      disk: current.disk || null,
+    };
+  }
+  const last = slim();
+  return {
+    appVersion: process.env.FILEBRIDGE_VERSION || null,
+    paused: !!cfg.paused,
+    current: cur,
+    queue: queue.map(q => nameOf(q.id)),
+    jobs: jobs.map(j => {
+      const r = last[j.id];
+      return {
+        id: j.id, name: j.name, kind: j.kind === 'web' ? 'web' : (j.driveApi ? 'drive' : 'folder'),
+        enabled: j.enabled !== false, nextRunAt: nextDue(j),
+        lastRun: j.lastRun ? { at: j.lastRun.at, ok: !!j.lastRun.ok, copied: j.lastRun.copied || 0, deleted: j.lastRun.deleted || 0,
+          errors: j.lastRun.errors || 0, warnings: j.lastRun.warnings || 0, ms: j.lastRun.ms || 0, bytes: (r && !r.dryRun && r.at === j.lastRun.at) ? (r.bytes || 0) : null } : null,
+      };
+    }),
+    grand: cfg.grand || null,
+  };
+}
 
 // Row-sized result summaries — the full action sample only ships via `result`.
 function slim() {
@@ -994,4 +1055,5 @@ exports._shutdown = function () {
   stopFlag = true;
   clearPause(); // wake a run parked in waitIfPaused so it can see stopFlag and unwind on shutdown
   for (const w of Object.values(loginWins)) { try { if (!w.isDestroyed()) w.destroy(); } catch {} }
+  statusFeed.stop(); // last write: running:false
 };
