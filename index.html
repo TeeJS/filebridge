@@ -1,13 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-layout="window">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FileBridge</title>
 <style>
-  /* FileBridge panel app — full-screen VIEW navigation, no modals (1920×480 touch).
-     Three stable regions per view: 64px header / scrolling content / 72px footer.
-     Spacing scale 8/16/24/32; 48px touch targets; accent only on the primary action;
+  /* FileBridge window — full-screen VIEW navigation, no modals. The base rules below are the
+     original touch-panel layout; the html[data-layout=window] block further down tightens
+     them into the desktop window layout, which is the only layout the app uses now.
+     Spacing scale 8/16/24/32; accent only on the primary action;
      red reserved for destruction (mirror deletes, job delete). */
   :root {
     --bg: #0d1117; --panel: #161b22; --panel-2: #1c2128; --border: #30363d;
@@ -37,7 +38,7 @@
   button:disabled { opacity: .4; cursor: default; }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
   button.danger { color: var(--red); border-color: #6e2b28; }
-  input[type=text], input[type=number], input[type=time], input[type=datetime-local] {
+  input[type=text], input[type=password], input[type=number], input[type=time], input[type=datetime-local] {
     font: 400 17px var(--mono); padding: 0 14px; min-height: 48px; border-radius: 8px;
     color: var(--text); background: var(--panel); border: 1px solid var(--border); }
   input[type=datetime-local] { color-scheme: dark; }
@@ -270,7 +271,7 @@
                        border-radius: 8px; color: var(--text); background: var(--panel); border: 1px solid var(--border); }
   .filtedit textarea:focus { outline: none; border-color: var(--accent); }
   @media (max-width: 900px) { .filtsplit { grid-template-columns: 1fr; } }
-  html[data-surface=editor] .filtsplit { grid-template-columns: 280px 1fr; }
+  html[data-layout=window] .filtsplit { grid-template-columns: 280px 1fr; }
 
   #groupMenu { position: fixed; z-index: 60; min-width: 260px; max-height: 60vh; overflow-y: auto;
                background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 8px;
@@ -286,77 +287,76 @@
   #groupMenu .sep { height: 1px; background: var(--border); margin: 6px 8px; }
   #groupMenu button[data-manage] .gm-n { color: var(--accent); }
 
-  /* The same app owns both surfaces. The host adds _surface=editor when it embeds the
-     manifest's editor entry; panel mode remains the fixed 1920x480 touch layout above. */
-  html[data-surface=editor] body { font-size: 14px; }
-  html[data-surface=editor] .view.active { animation: none; }
-  html[data-surface=editor] .page-header,
-  html[data-surface=editor] .vhead { min-height: 60px; height: auto; padding: 8px 20px; }
-  html[data-surface=editor] .page-header h1,
-  html[data-surface=editor] .vhead h2 { font-size: 21px; }
-  html[data-surface=editor] .list-scroll,
-  html[data-surface=editor] .vbody { padding: 16px 20px 24px; }
-  html[data-surface=editor] #runbar { padding: 12px 20px; }
-  html[data-surface=editor] #lastband { padding: 8px 20px; }
-  html[data-surface=editor] #bandBody { font-size: 13px; }
-  /* The host's embed can be taller than the visible area, which pushed the bottom-pinned
-     footer (Save/Cancel) off-screen. In the editor surface, flow the document naturally and
-     make header/footer sticky so Back and Save are ALWAYS visible, whatever the iframe size. */
-  html[data-surface=editor], html[data-surface=editor] body { height: auto; overflow: visible; }
-  html[data-surface=editor] .view.active { height: auto; min-height: 0; }
-  html[data-surface=editor] .list-scroll, html[data-surface=editor] .vbody { overflow: visible; }
-  html[data-surface=editor] .vhead { position: sticky; top: 0; z-index: 25; }
-  html[data-surface=editor] .vfoot { position: sticky; bottom: 0; z-index: 25; }
-  html[data-surface=editor] .oplist, html[data-surface=editor] .logpre,
-  html[data-surface=editor] .filtlist { max-height: 420px; }
-  html[data-surface=editor] .filtsplit { flex: none; }
-  html[data-surface=editor] .filtedit textarea { min-height: 200px; }
-  html[data-surface=editor] .vfoot { min-height: 64px; height: auto; padding: 8px 20px; }
-  html[data-surface=editor] button { min-height: 40px; padding: 0 14px; }
-  html[data-surface=editor] input[type=text],
-  html[data-surface=editor] input[type=number],
-  html[data-surface=editor] input[type=time],
-  html[data-surface=editor] input[type=datetime-local] { min-height: 40px; font-size: 15px; }
-  html[data-surface=editor] .chk { min-height: 40px; font-size: 14px; }
-  html[data-surface=editor] .job-table-header { display: none; }
-  html[data-surface=editor] .joblist { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; }
-  html[data-surface=editor] #rows { display: grid; gap: 6px; }
+  /* Desktop window layout (always on: <html data-layout="window">). */
+  html[data-layout=window] body { font-size: 14px; }
+  html[data-layout=window] .view.active { animation: none; }
+  html[data-layout=window] .page-header,
+  html[data-layout=window] .vhead { min-height: 60px; height: auto; padding: 8px 20px; }
+  html[data-layout=window] .page-header h1,
+  html[data-layout=window] .vhead h2 { font-size: 21px; }
+  html[data-layout=window] .list-scroll,
+  html[data-layout=window] .vbody { padding: 16px 20px 24px; }
+  html[data-layout=window] #runbar { padding: 12px 20px; }
+  html[data-layout=window] #lastband { padding: 8px 20px; }
+  html[data-layout=window] #bandBody { font-size: 13px; }
+  /* Flow the document naturally and make header/footer sticky so Back and Save are ALWAYS
+     visible, whatever the window size. */
+  html[data-layout=window], html[data-layout=window] body { height: auto; overflow: visible; }
+  html[data-layout=window] .view.active { height: auto; min-height: 0; }
+  html[data-layout=window] .list-scroll, html[data-layout=window] .vbody { overflow: visible; }
+  html[data-layout=window] .vhead { position: sticky; top: 0; z-index: 25; }
+  html[data-layout=window] .vfoot { position: sticky; bottom: 0; z-index: 25; }
+  html[data-layout=window] .oplist, html[data-layout=window] .logpre,
+  html[data-layout=window] .filtlist { max-height: 420px; }
+  html[data-layout=window] .filtsplit { flex: none; }
+  html[data-layout=window] .filtedit textarea { min-height: 200px; }
+  html[data-layout=window] .vfoot { min-height: 64px; height: auto; padding: 8px 20px; }
+  html[data-layout=window] button { min-height: 40px; padding: 0 14px; }
+  html[data-layout=window] input[type=text],
+  html[data-layout=window] input[type=password],
+  html[data-layout=window] input[type=number],
+  html[data-layout=window] input[type=time],
+  html[data-layout=window] input[type=datetime-local] { min-height: 40px; font-size: 15px; }
+  html[data-layout=window] .chk { min-height: 40px; font-size: 14px; }
+  html[data-layout=window] .job-table-header { display: none; }
+  html[data-layout=window] .joblist { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; }
+  html[data-layout=window] #rows { display: grid; gap: 6px; }
   /* Compact card: name + paths and the buttons share the top line; schedule / last run /
      next run / status flow together on ONE wrapping line below (the .brk element forces
-     the line break; it is display:none in the panel's table layout). */
-  html[data-surface=editor] .job-row {
+     the line break). */
+  html[data-layout=window] .job-row {
     display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px;
     min-height: 0; min-width: 0; /* a grid item won't shrink below content without this */
     padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
     background: var(--panel);
   }
-  html[data-surface=editor] .job-row .sel { order: 0; min-height: 40px; min-width: 36px; }
-  html[data-surface=editor] .job-row .jmain { order: 1; flex: 1 1 240px; min-width: 0; }
-  html[data-surface=editor] .job-row .act { order: 2; margin-left: auto; }
-  html[data-surface=editor] .job-row .brk { display: block; order: 3; flex-basis: 100%; height: 0; }
-  html[data-surface=editor] .job-row > .cell, html[data-surface=editor] .job-row > .st { order: 4; font-size: 13px; }
-  html[data-surface=editor] .job-row button { min-height: 32px; padding: 0 12px; font-size: 13px; }
-  html[data-surface=editor] .job-row .kebab { min-width: 36px; }
-  html[data-surface=editor] .job-row.selected { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
-  html[data-surface=editor] .jname { font-size: 15px; line-height: 20px; }
-  html[data-surface=editor] .jpaths { font-size: 12px; }
-  html[data-surface=editor] .job-row > :nth-child(3)::before { content: 'Schedule: '; color: var(--faint); }
-  html[data-surface=editor] .job-row > :nth-child(4)::before { content: 'Last: '; color: var(--faint); }
-  html[data-surface=editor] .job-row > :nth-child(5)::before { content: 'Next: '; color: var(--faint); }
-  html[data-surface=editor] .frow { flex-wrap: wrap; gap: 8px 12px; }
-  html[data-surface=editor] .frow label.fl { width: 90px; }
-  html[data-surface=editor] .fhelp,
-  html[data-surface=editor] .fwarn { margin-left: 102px; }
-  html[data-surface=editor] .brand-subtitle { display: none; }
+  html[data-layout=window] .job-row .sel { order: 0; min-height: 40px; min-width: 36px; }
+  html[data-layout=window] .job-row .jmain { order: 1; flex: 1 1 240px; min-width: 0; }
+  html[data-layout=window] .job-row .act { order: 2; margin-left: auto; }
+  html[data-layout=window] .job-row .brk { display: block; order: 3; flex-basis: 100%; height: 0; }
+  html[data-layout=window] .job-row > .cell, html[data-layout=window] .job-row > .st { order: 4; font-size: 13px; }
+  html[data-layout=window] .job-row button { min-height: 32px; padding: 0 12px; font-size: 13px; }
+  html[data-layout=window] .job-row .kebab { min-width: 36px; }
+  html[data-layout=window] .job-row.selected { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+  html[data-layout=window] .jname { font-size: 15px; line-height: 20px; }
+  html[data-layout=window] .jpaths { font-size: 12px; }
+  html[data-layout=window] .job-row > :nth-child(3)::before { content: 'Schedule: '; color: var(--faint); }
+  html[data-layout=window] .job-row > :nth-child(4)::before { content: 'Last: '; color: var(--faint); }
+  html[data-layout=window] .job-row > :nth-child(5)::before { content: 'Next: '; color: var(--faint); }
+  html[data-layout=window] .frow { flex-wrap: wrap; gap: 8px 12px; }
+  html[data-layout=window] .frow label.fl { width: 90px; }
+  html[data-layout=window] .fhelp,
+  html[data-layout=window] .fwarn { margin-left: 102px; }
+  html[data-layout=window] .brand-subtitle { display: none; }
 
   @media (max-width: 760px) {
-    html[data-surface=editor] .page-header { flex-wrap: wrap; }
-    html[data-surface=editor] .job-count { margin-left: 0; }
-    html[data-surface=editor] .job-row .act { flex-wrap: wrap; }
-    html[data-surface=editor] .frow label.fl { width: 100%; text-align: left; }
-    html[data-surface=editor] .pathpick { flex-basis: 100%; }
-    html[data-surface=editor] .fhelp,
-    html[data-surface=editor] .fwarn { margin-left: 0; }
+    html[data-layout=window] .page-header { flex-wrap: wrap; }
+    html[data-layout=window] .job-count { margin-left: 0; }
+    html[data-layout=window] .job-row .act { flex-wrap: wrap; }
+    html[data-layout=window] .frow label.fl { width: 100%; text-align: left; }
+    html[data-layout=window] .pathpick { flex-basis: 100%; }
+    html[data-layout=window] .fhelp,
+    html[data-layout=window] .fwarn { margin-left: 0; }
   }
 </style>
 </head>
@@ -370,7 +370,6 @@
     <p class="brand-subtitle">Replicate folders between drives and network shares — on demand or on a schedule.</p>
     <span id="msg"></span>
     <span class="job-count" id="count"></span>
-    <button id="openWin" hidden>Open in window</button>
     <button id="pauseToggle" title="Pause all scheduled runs — manual Run/Preview still work">Pause schedules</button>
     <button id="openLog">Activity</button>
     <button id="openRules">Rules</button>
@@ -432,14 +431,14 @@
        the BOTTOM and stays hidden while everything's healthy; it auto-surfaces the item(s)
        that need attention, and the header Accounts button reveals the full set on demand. -->
   <div id="sites" hidden></div>
-  <!-- Google Drive API credentials (shown via the Set up… chip button; lives OUTSIDE #sites so
-       the poll re-render can never wipe what's being typed). The client secret goes straight to
-       the HOST's OAuth store — this app never persists it. -->
+  <!-- Google Drive API credentials (shown via the Set up… / Change client… chip button; lives
+       OUTSIDE #sites so the poll re-render can never wipe what's being typed). The client
+       secret is stored encrypted (Windows DPAPI) and is never sent back to this page. -->
   <div id="driveSetup" hidden style="padding:10px 14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--border)">
     <input id="driveClientId" type="text" placeholder="Google OAuth client ID" style="flex:1;min-width:260px">
     <input id="driveClientSecret" type="password" placeholder="Client secret" style="flex:1;min-width:180px">
     <button id="driveConnectBtn" class="primary">Save &amp; connect</button>
-    <span class="fhelp" style="flex-basis:100%;margin:0">From Google Cloud Console: create an OAuth client of type <b>Desktop app</b>, publish the consent screen to <b>Production</b> (or the connection expires weekly), and paste its ID and secret here. Approval opens in your browser; the credentials are stored by the Bedrock Panel host, not this app.</span>
+    <span class="fhelp" style="flex-basis:100%;margin:0">From Google Cloud Console: create an OAuth client of type <b>Desktop app</b>, publish the consent screen to <b>Production</b> (or the connection expires weekly), and paste its ID and secret here. Approval opens in your browser. The secret and the sign-in are stored encrypted for your Windows account. Saving a different client ID signs out the old one.</span>
   </div>
 </div>
 
@@ -588,7 +587,7 @@
       </span>
     </div>
     <p class="fhelp" id="cronNext" hidden></p>
-    <p class="fhelp">Cron: <b>minute hour day month weekday</b> — e.g. <b>*/30 8-18 * * mon-fri</b> is every 30 min, 8 AM–6 PM, weekdays. Wildcards are separated by <b>;</b> and match file names or relative paths — <b>*</b> any run of characters, <b>?</b> one character, <b>#</b> one digit, <b>[ab]</b>/<b>[!ab]</b> character sets; <b>*.*</b> matches every file, extensionless included. Schedules run while Bedrock Panel is running.</p>
+    <p class="fhelp">Cron: <b>minute hour day month weekday</b> — e.g. <b>*/30 8-18 * * mon-fri</b> is every 30 min, 8 AM–6 PM, weekdays. Wildcards are separated by <b>;</b> and match file names or relative paths — <b>*</b> any run of characters, <b>?</b> one character, <b>#</b> one digit, <b>[ab]</b>/<b>[!ab]</b> character sets; <b>*.*</b> matches every file, extensionless included. Schedules run while FileBridge is running — closing the window keeps it running in the tray.</p>
     <p class="ferr" id="editErr"></p>
   </div>
   <div class="vfoot">

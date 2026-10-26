@@ -213,7 +213,6 @@ function logRunEntries(name, summary, plan, cats) {
 }
 
 // ── run queue: one job at a time ──────────────────────────────────────────────
-let jobWin = null;       // the pop-out job-manager window (single instance)
 let current = null;      // { id, name, dryRun, trigger, phase, progress, startedAt }
 const queue = [];        // [{ id, dryRun, trigger }]
 const lastResults = {};  // id -> summary of last run/preview (in-memory; full action list)
@@ -977,40 +976,6 @@ exports.handle = async function handle(action, ctx) {
     return { ok: true, path: RULES_DIR };
   }
 
-  // Open the job manager in its own resizable window — the editor's embedded frame nests
-  // inside the editor's scrolling page (double scrollbar), so editing is nicer in a real
-  // window with a single scroll and the footer always at the window bottom. The page passes
-  // its own loopback origin; only 127.0.0.1/localhost is accepted, and the path is built
-  // here, so the window can only ever load this app's own served page.
-  if (action === 'openWindow') {
-    const origin = String(body.origin || '');
-    if (!/^http:\/\/(127\.0\.0\.1|localhost):\d{2,5}$/.test(origin)) return { ok: false, error: 'bad origin' };
-    const accent = /^#?[0-9a-fA-F]{3,8}$/.test(String(body.accent || '')) ? String(body.accent) : '';
-    // Optional intent: land the window directly on a task (add/edit/result/filters).
-    const id = v => (/^[a-z0-9]{1,32}$/i.test(String(v || '')) ? String(v) : '');
-    const intent = body.edit === 'new' ? '&_add=1'
-      : id(body.edit) ? '&_edit=' + id(body.edit)
-      : id(body.result) ? '&_result=' + id(body.result)
-      : body.filters ? '&_filters=1'
-      : body.rules ? '&_rules=1' : '';
-    if (jobWin && !jobWin.isDestroyed()) {
-      // An already-open window must still LAND on the requested task, or every editor
-      // click after the first just focuses whatever the window was showing.
-      if (intent) jobWin.loadURL(origin + '/apps/file-bridge/index.html?_surface=window' + (accent ? '&_accent=' + encodeURIComponent(accent) : '') + intent);
-      jobWin.focus();
-      return { ok: true, already: true };
-    }
-    const { BrowserWindow } = require('electron');
-    jobWin = new BrowserWindow({
-      width: 1180, height: 800, minWidth: 700, minHeight: 480,
-      autoHideMenuBar: true, backgroundColor: '#0d1117', title: 'FileBridge — jobs',
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-    });
-    jobWin.on('closed', () => { jobWin = null; });
-    jobWin.loadURL(origin + '/apps/file-bridge/index.html?_surface=window' + (accent ? '&_accent=' + encodeURIComponent(accent) : '') + intent);
-    return { ok: true };
-  }
-
   return { ok: false, error: 'unknown action' };
 };
 
@@ -1029,6 +994,4 @@ exports._shutdown = function () {
   stopFlag = true;
   clearPause(); // wake a run parked in waitIfPaused so it can see stopFlag and unwind on shutdown
   for (const w of Object.values(loginWins)) { try { if (!w.isDestroyed()) w.destroy(); } catch {} }
-  if (jobWin && !jobWin.isDestroyed()) { try { jobWin.destroy(); } catch {} }
-  jobWin = null;
 };

@@ -32,11 +32,7 @@ let tray = null;
 let server = null;
 let quitting = false;
 
-const driveAuth = new DriveAuth({
-  file: path.join(app.getPath('userData'), 'oauth.json'),
-  openExternal: async url => { await shell.openExternal(url); return true; },
-  log,
-});
+let driveAuth = null; // created at ready, beside jobs.json in the data folder
 const oauth = {
   status: () => driveAuth.status(),
   connect: (scopes, creds) => driveAuth.connect(scopes, creds),
@@ -78,7 +74,7 @@ function showWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('filebridge://app/')) e.preventDefault(); });
-  win.loadURL('filebridge://app/index.html?_surface=window');
+  win.loadURL('filebridge://app/index.html');
 }
 
 // "Start with Windows" only means something for the installed app: in development it would
@@ -109,6 +105,11 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
 
   app.whenReady().then(() => {
+    driveAuth = new DriveAuth({
+      file: path.join(process.env.FILEBRIDGE_DATA_DIR, 'oauth.json'),
+      openExternal: async url => { await shell.openExternal(url); return true; },
+      log,
+    });
     protocol.handle('filebridge', createRouter({ root: __dirname, getServer, oauth, pickFolder, log }));
 
     // Load the engine now so cron schedules arm without the window, and hand it the Drive
@@ -128,6 +129,6 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true;
     try { if (server && server._shutdown) server._shutdown(); } catch {}
-    driveAuth.stop();
+    if (driveAuth) driveAuth.stop();
   });
 }

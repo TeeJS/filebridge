@@ -1,18 +1,6 @@
 'use strict';
-// FileBridge panel app. External file (not inline) because the panel serves apps with
-// CSP script-src 'self'. Full-screen VIEW navigation (main / edit / result / log), no modals.
-
-// Follow the host panel's theme: the served URL carries _accent=<color>.
-// Surfaces: '' = panel (1920×480 touch), 'editor' = embedded in the editor (dense layout +
-// an "Open in window" escape hatch), 'window' = the pop-out job-manager window (same dense
-// layout, no escape hatch — it IS the window).
-const qs = new URLSearchParams(location.search);
-const surface = qs.get('_surface') || '';
-if (surface === 'editor' || surface === 'window') document.documentElement.dataset.surface = 'editor';
-const accent = qs.get('_accent');
-if (accent && /^#?[0-9a-f]{3,8}$/i.test(accent)) {
-  document.documentElement.style.setProperty('--accent', accent.startsWith('#') ? accent : '#' + accent);
-}
+// FileBridge window page. External file (not inline) because the page's CSP is
+// script-src 'self'. Full-screen VIEW navigation (main / edit / result / log), no modals.
 
 const $ = s => document.querySelector(s);
 const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c =>
@@ -23,7 +11,7 @@ async function requestJson(url, opts) {
   let result = null;
   try { result = await response.json(); } catch {}
   if (result) return result;
-  throw new Error(response.ok ? 'The host returned an empty response' : `The host returned HTTP ${response.status}`);
+  throw new Error(response.ok ? 'FileBridge returned an empty response' : `FileBridge returned HTTP ${response.status}`);
 }
 function api(action, body) {
   const opts = body
@@ -37,7 +25,7 @@ let jobs = [];
 let grand = null;
 let logCatsState = null; // which per-file categories get written to the activity log (from `list`)
 let rules = [], sessions = [];
-let driveInfo = null; // host OAuth status for the Google Drive API ({available, configured, connected})
+let driveInfo = null; // Google Drive API sign-in status ({available, configured, connected})
 let paused = false;   // global scheduler pause (manual runs still work)
 function renderPause() {
   const b = $('#pauseToggle');
@@ -215,7 +203,7 @@ function buildRows() {
       '<span class="cell">' + (j.nextRunAt && j.enabled !== false ? esc(fmtIn(j.nextRunAt)) : '—') + '</span>' +
       stHtml(j) +
       '<span class="act">' + actHtml(j) + '</span>' +
-      '<span class="brk"></span>' + // editor-surface line break; display:none in the panel
+      '<span class="brk"></span>' + // forces the compact card's second line
     '</div>').join('');
 }
 // The list re-renders on a 1 s poll — rewrite the DOM only when the markup actually
@@ -275,7 +263,10 @@ function driveChipHtml() {
   const btn = driveInfo.connected ? '<button data-drive-act="disconnect">Disconnect</button>'
     : driveInfo.configured ? '<button data-drive-act="connect">Connect</button>'
       : '<button data-drive-act="setup">Set up…</button>';
-  return '<span><b>Google Drive API</b> — ' + state + '</span>' + btn;
+  // A stored client can die (deleted Cloud project, rotated secret) — always offer a way to
+  // replace it. Saving a different client ID drops the old tokens and signs in fresh.
+  const change = driveInfo.configured ? '<button data-drive-act="setup">Change client…</button>' : '';
+  return '<span><b>Google Drive API</b> — ' + state + '</span>' + btn + change;
 }
 function renderSites() {
   const el = $('#sites');
@@ -511,7 +502,7 @@ document.querySelectorAll('.pickFolder').forEach(button => button.addEventListen
     if (result.ok && typeof result.path === 'string') input.value = result.path;
     else if (!result.canceled) $('#editErr').textContent = result.error || 'The folder picker could not be opened.';
   } catch (error) {
-    $('#editErr').textContent = 'Folder picker unavailable — update Bedrock Panel to a version that supports served-app folder selection.';
+    $('#editErr').textContent = 'The folder picker could not be opened.';
   } finally {
     button.disabled = false;
   }
@@ -591,8 +582,6 @@ async function ruleMatchPreview() {
 $('#fUrl').addEventListener('input', () => { clearTimeout(ruleTimer); ruleTimer = setTimeout(ruleMatchPreview, 400); });
 
 function openEdit(j) {
-  // Editor embed: forms are unusable inside nested scrollbars — edit in the real window.
-  if (LAUNCHER) { winOpen({ edit: j ? j.id : 'new' }); return; }
   editId = j ? j.id : null;
   $('#editTitle').textContent = j ? 'Edit job' : 'Add a job';
   $('#fName').value = j ? j.name : '';
@@ -801,7 +790,6 @@ $('#manageFilters').addEventListener('click', e => { e.preventDefault(); openFil
 let fgSelId = null;
 let filtersReturnView = 'Edit';
 async function openFilters() {
-  if (LAUNCHER) { winOpen({ filters: 1 }); return; }
   filtersReturnView = activeView === 'Filters' ? filtersReturnView : activeView;
   await loadGroups();
   fgSelId = null;
@@ -861,7 +849,6 @@ $('#filtDone').addEventListener('click', backFromFilters);
 // ── result view ───────────────────────────────────────────────────────────────
 let resultId = null;
 async function openResult(id) {
-  if (LAUNCHER) { winOpen({ result: id }); return; }
   resultId = id;
   const j = jobs.find(x => x.id === id);
   const r = await api('result', { id });
@@ -1012,30 +999,6 @@ $('#resList').addEventListener('click', e => {
   rowEl.classList.toggle('open');
 });
 
-// ── pop-out window ────────────────────────────────────────────────────────────
-// In the editor EMBED (nested inside the editor's own scrolling page), forms are unusable —
-// so there, EVERY editing action opens the real window automatically, landed on that task.
-// The embed stays a compact live list: run / preview / stop / status only.
-const LAUNCHER = surface === 'editor';
-async function winOpen(intent) {
-  const r = await api('openWindow', { origin: location.origin, accent: accent || '', ...(intent || {}) });
-  if (!r.ok) msg(r.error, 'bad');
-  else if (r.already) msg('Job manager window is already open — brought it to the front.', 'info');
-}
-$('#openWin').hidden = !LAUNCHER;
-$('#openWin').textContent = 'Open job manager';
-$('#openWin').addEventListener('click', () => winOpen());
-
-// Editor embed: report our content height to the host so an embed-autosize-capable host
-// can size the iframe to fit instead of leaving dead space below the list (see
-// HANDOFF-editor-embed-autosize.md). Harmless no-op on hosts that don't listen.
-if (LAUNCHER && window.parent !== window) {
-  const reportHeight = () => window.parent.postMessage(
-    { type: 'oq-embed-height', app: 'file-bridge', height: document.body.scrollHeight }, '*');
-  try { new ResizeObserver(reportHeight).observe(document.body); } catch {}
-  window.addEventListener('load', reportHeight);
-}
-
 // ── rules view (user-supplied per-site instruction files for web jobs) ────────
 // Unsaved edits are kept in recLocal per tab, so switching tabs or leaving the view
 // never discards typed-but-unsaved rule JSON. The app ships no rules — a generic
@@ -1059,7 +1022,6 @@ function stashRuleEdit() {
   else delete recLocal[recSel];
 }
 async function openRules() {
-  if (LAUNCHER) { winOpen({ rules: 1 }); return; }
   const r = await api('rules').catch(() => null);
   if (!r || !r.ok) { msg((r && r.error) || 'Cannot load rules', 'bad'); return; }
   recFiles = r.files || {};
@@ -1115,7 +1077,6 @@ $('#recBack').addEventListener('click', () => { stashRuleEdit(); showView('Main'
 $('#recDone').addEventListener('click', () => { stashRuleEdit(); showView('Main'); });
 
 // ── log view ──────────────────────────────────────────────────────────────────
-$('#openLog').hidden = LAUNCHER; // embed is list-only; the log lives in the window
 $('#pauseToggle').addEventListener('click', async () => {
   const r = await api('setPaused', { paused: !paused });
   if (!r.ok) { msg(r.error, 'bad'); return; }
@@ -1202,17 +1163,16 @@ $('#eraseLog').addEventListener('click', async e => {
 });
 
 // ── completion alert (Karen parity: beep when a run finishes) ─────────────────
-// One shared preference in localStorage (all surfaces share the app's origin; default ON,
-// like Karen); the tones are WebAudio so no asset or external fetch is needed. Only a
-// VISIBLE, full surface beeps (Karen: alert only when the window is visible) — that also
-// keeps the panel and an open pop-out window from chirping in chorus when both are shown.
+// The preference lives in localStorage (default ON, like Karen); the tones are WebAudio so
+// no asset or external fetch is needed. Only a VISIBLE window beeps (Karen: alert only when
+// the window is visible), so a window hidden to the tray stays quiet.
 try { $('#alertSound').checked = localStorage.getItem('fsync-beep') !== '0'; } catch {}
 $('#alertSound').addEventListener('change', e => {
   try { localStorage.setItem('fsync-beep', e.target.checked ? '1' : '0'); } catch {}
 });
 let audioCtx = null;
 function beep(ok) {
-  if (LAUNCHER || document.hidden) return; // the embed has no toggle; hidden surfaces stay quiet
+  if (document.hidden) return; // hidden to the tray: stay quiet
   if (!$('#alertSound').checked) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -1262,9 +1222,7 @@ async function poll() {
     await refreshList(); // a run just finished — pick up lastRun / nextRun
     if (pendingPreview && lastResults[pendingPreview] && lastResults[pendingPreview].dryRun) {
       const id = pendingPreview; pendingPreview = null;
-      // Embed: don't pop the window uninvited — the card status shows the preview summary,
-      // and "View last result" in the row menu opens the window on the full detail.
-      if (!LAUNCHER) openResult(id);
+      openResult(id);
     }
     msg('', '');
   } else if (activeView === 'Main') {
@@ -1466,15 +1424,7 @@ $('#bandClose').addEventListener('click', () => {
   renderLastBand();
 });
 
-refreshList().then(() => {
-  // Pop-out window: land directly on the task that opened it (_add/_edit/_result/_filters).
-  if (surface !== 'window') return;
-  if (qs.get('_add')) openEdit(null);
-  else if (qs.get('_edit')) { const j = jobs.find(x => x.id === qs.get('_edit')); if (j) openEdit(j); }
-  else if (qs.get('_result')) openResult(qs.get('_result'));
-  else if (qs.get('_filters')) openFilters();
-  else if (qs.get('_rules')) openRules();
-});
+refreshList();
 loadGroups(); // so the "+ Group" menu is populated before the first Add job
 setInterval(poll, 1000);
 setInterval(refreshList, 30000); // keep session chips / rules / next-run times fresh
