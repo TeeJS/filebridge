@@ -1,7 +1,11 @@
 # FileBridge standalone — project charter
 
-Status: APPROVED 2026-10-26. Steps 1 (repo) and 2 (shell) done, committed locally (latest fd4c585).
-No remote yet.
+Status: APPROVED 2026-10-26.
+- Done: steps 1–5, all pushed to github.com/TeeJS/filebridge.
+- Step 6: release files are ready, and the v2.0.0 notes await T.J.'s review. CI signing is blocked
+  on the Azure federated credential, which T.J. must add himself.
+- Step 8: the monitor is built and verified on the local branch `file-bridge-monitor` (worktree
+  `D:\Github\open-quake\wt-fbmonitor`). It is unmerged until step 7, T.J.'s live test.
 
 FileBridge (today: the `file-bridge` drop-in, v1.7.4, in TeeJS/bedrock-panel at
 `community-apps/file-bridge/`) becomes its own signed Windows Electron app. Bedrock Panel keeps a
@@ -80,6 +84,25 @@ The Electron calls FileBridge already makes directly (`BrowserWindow` for sign-i
    projects were deleted, and with a dead client stored the UI offered no way to enter a new one.
 4. New `status.js`: writes `status.json` (see below).
 5. New `import.js`: the first-run migration (see below).
+
+## Changes made during the build (beyond the edit list)
+
+- **Import safety, from review.** The drop-in's `jobs.json` is renamed **first**, then read.
+  Imported jobs wait for their next scheduled time. A job whose scheduled run was still going in
+  Bedrock Panel is **held** until that run's result appears (24 h at most). For 24 h a follow-up:
+  - renames a `jobs.json` that comes back with jobs, keeping its newer results and any jobs added
+    there;
+  - adds a late run's grand totals;
+  - merges seen-ledgers.
+
+  Existing files are kept as `.pre-import-<stamp>`. A failed import hands the jobs back.
+- **Drive sign-in, from review.** A dead or revoked sign-in shows "not connected". A failed
+  refresh is retried on network errors and 5xx. Only one listener runs, and a refresh that
+  finishes after Disconnect never brings the tokens back.
+- **Shell, from review.** `/app-api` accepts POST only. A development run uses
+  `%APPDATA%\FileBridge-dev`. A startup failure shows a dialog and exits. A Windows session end
+  triggers a clean shutdown.
+- **Monitor version.** It is **1.7.5**, following the patch-only drop-in rule.
 
 ## status.json contract (v1)
 

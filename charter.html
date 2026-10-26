@@ -86,7 +86,7 @@ footer { font-size: .85rem; color: var(--muted); }
 
 <div class="wrap">
   <header>
-    <span class="status">Approved · steps 1–2 done</span>
+    <span class="status">Approved · steps 1–5 and 8 built · waiting on you</span>
     <h1>FileBridge, standalone</h1>
     <p class="lede">FileBridge moves out of Bedrock Panel into its own signed Windows app. The Panel keeps a read-only monitor of transfer status and stops managing anything.</p>
     <p class="muted">Source of record: <code>D:\Github\filebridge\PROJECT.md</code> · 2026-10-26 · today's drop-in is v1.7.4</p>
@@ -251,5 +251,45 @@ footer { font-size: .85rem; color: var(--muted); }
     <p>About <strong>3–4 days of work</strong>. My first 1–2-day estimate covered only the shell; the migration, the status feed and the Panel monitor add the rest.</p>
   </section>
 
-  <footer>Approved 2026-10-26. Steps 1 (repo) and 2 (shell) are committed locally (latest <code>fd4c585</code>); nothing is pushed and there is no GitHub repo yet.</footer>
+  <section>
+    <h2>Where it stands</h2>
+    <ul class="check">
+      <li><span><strong>Done:</strong> steps 1–5, pushed to <code>github.com/TeeJS/filebridge</code>. The independent review's 23 findings and the re-review's 5 are fixed. 44 unit tests, the engine self-checks, the live scenarios and a packaged-build start all pass.</span></li>
+      <li><span><strong>Waiting on you:</strong> step 6 needs the Azure federated credential (the safety check would not let Claude grant it), then your OK on the release notes and the tag.</span></li>
+      <li><span><strong>Built, not merged:</strong> step 8, the Panel monitor (<code>file-bridge</code> 1.7.5). It is checked at 1920×480 in 12 states and committed on the local branch <code>file-bridge-monitor</code>. It merges after your live test (step 7).</span></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Changes made during the build</h2>
+    <ul>
+      <li><strong>Import safety, from review.</strong>
+        <ul>
+          <li>The Panel's <code>jobs.json</code> is renamed first, then read.</li>
+          <li>Imported jobs wait for their next scheduled time.</li>
+          <li>A job whose scheduled run was still going in Bedrock Panel is held until that run finishes, for 24 hours at most.</li>
+          <li>For 24 hours a follow-up catches late Bedrock Panel writes: it renames a revived <code>jobs.json</code> away again, adds late totals and merges seen-ledgers.</li>
+          <li>A failed import hands the jobs back.</li>
+        </ul>
+      </li>
+      <li><strong>Drive sign-in, from review.</strong>
+        <ul>
+          <li>A dead sign-in shows "not connected".</li>
+          <li>A refresh is retried on a network blip or server error.</li>
+          <li>Only one sign-in listener runs, and a late refresh never brings back tokens after Disconnect.</li>
+        </ul>
+      </li>
+      <li><strong>Shell, from review.</strong>
+        <ul>
+          <li>The API accepts POST only.</li>
+          <li>Development runs keep their data in <code>FileBridge-dev</code>.</li>
+          <li>A startup failure shows a message and exits.</li>
+          <li>The app shuts down cleanly when Windows ends the session.</li>
+        </ul>
+      </li>
+      <li><strong>Monitor version.</strong> 1.7.5, following the patch-only drop-in rule.</li>
+    </ul>
+  </section>
+
+  <footer>Approved 2026-10-26. FileBridge <code>main</code> is at <code>dbbf062</code> on GitHub. The monitor is at <code>06e6e6d</code> on the local branch <code>file-bridge-monitor</code> (unmerged).</footer>
 </div>
