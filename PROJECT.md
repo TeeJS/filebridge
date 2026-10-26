@@ -1,6 +1,6 @@
 # FileBridge standalone — project charter
 
-Status: DRAFT, awaiting T.J.'s sign-off (2026-10-26). Nothing built yet.
+Status: APPROVED 2026-10-26. Step 1 (repo) done, committed locally at 664dab1. No remote yet.
 
 FileBridge (today: the `file-bridge` drop-in, v1.7.4, in TeeJS/bedrock-panel at
 `community-apps/file-bridge/`) becomes its own signed Windows Electron app. Bedrock Panel keeps a
