@@ -594,12 +594,7 @@ function importFollowUp() {
   try {
     const did = panelImport.followUp({
       dataDir: DATA_DIR,
-      addToGrand: delta => {
-        const cfg = loadCfg();
-        const g = cfg.grand || (cfg.grand = { since: new Date().toISOString() });
-        for (const [k, v] of Object.entries(delta)) if (k !== 'since') g[k] = (g[k] || 0) + v;
-        saveCfg(cfg, false);
-      },
+      mergeLate: late => { const cfg = loadCfg(); panelImport.applyLate(cfg, late, Date.now()); saveCfg(cfg, true); },
     });
     for (const line of did || []) logLine('import follow-up: ' + line);
   } catch (e) { logLine('import follow-up failed: ' + e.message); }

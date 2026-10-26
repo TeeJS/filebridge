@@ -97,20 +97,26 @@ function copyTree(src, dst, tag, copied, seen = new Set()) {
 }
 
 // The scheduled run the drop-in had started but not finished when its log was last written.
-// Its log has "schedule due: NAME" when a run is queued and "run NAME (...): ..." when it ends;
-// it runs ONE job at a time in queue order, so of the unfinished ones only the OLDEST can be
-// running — the rest were merely queued, and the rename already cancelled them (its pump skips
-// jobs it can no longer find). Manual runs are not logged at start, which is why the offer also
-// asks the user to check.
-function runsInProgress(logText) {
-  const open = [];
-  for (const line of String(logText || '').split(/\r?\n/).slice(-2000)) {
-    const due = /\] schedule due: (.+)$/.exec(line);
-    if (due) { open.push(due[1]); continue; }
+// Its log has "[<local time>] schedule due: NAME" when a run is queued, and usually
+// "run NAME (...): ..." when it ends — but that end line is skipped when the user turned the
+// summary log category off, and a stop-all, a Bedrock Panel quit or a rename can leave a due
+// line unanswered too. So: every unanswered due line counts as possibly running (holding too
+// much only delays a job; holding too little could run it twice), EXCEPT when the job's
+// result-<id>.json — written at the end of every run, log settings aside — is newer than the
+// due line, or a later "stop all" cleared the queue. Manual runs are not logged at start,
+// which is why the offer also asks the user to check.
+// resultTimeFor(name) -> newest result-file mtime among jobs with that name (0 if none).
+function runsInProgress(logText, resultTimeFor = () => 0) {
+  const open = new Map(); // name -> time of its unanswered due line
+  for (const line of String(logText || '').split(/\r?\n/).slice(-5000)) {
+    const due = /^\[([^\]]*)\] schedule due: (.+)$/.exec(line);
+    if (due) { open.set(due[2], Date.parse(due[1]) || 0); continue; }
+    if (/\] stop all: cleared the run queue/.test(line)) { open.clear(); continue; }
     const end = /\] (?:run|preview) (.+?) \((?:schedule|manual)\): /.exec(line);
-    if (end) { const i = open.indexOf(end[1]); if (i >= 0) open.splice(i, 1); }
+    if (end) open.delete(end[1]);
   }
-  return new Set(open.slice(0, 1));
+  for (const [name, t] of open) if (t && resultTimeFor(name) > t) open.delete(name);
+  return new Set(open.keys());
 }
 
 function readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } }
@@ -128,7 +134,20 @@ function runImport({ appData, dataDir, now = new Date() }) {
   const tag = stamp(now);
   const oldJobs = path.join(from, 'jobs.json');
   const renamedTo = path.join(from, `jobs.migrated-${tag}.json`);
-  const handBack = () => { try { if (!fs.existsSync(oldJobs)) fs.renameSync(renamedTo, oldJobs); } catch {} };
+  // Give the jobs back to the drop-in. If a late run of its already saved a job-less jobs.json,
+  // keep that run's totals: fold them into the restored file (the late file is kept, renamed).
+  const handBack = () => {
+    try {
+      if (!fs.existsSync(oldJobs)) { fs.renameSync(renamedTo, oldJobs); return; }
+      const late = readJson(oldJobs);
+      if (!late || (Array.isArray(late.jobs) && late.jobs.length)) return; // it already has jobs again
+      const back = readJson(renamedTo);
+      if (!back) return;
+      back.grand = addGrand(back.grand, late.grand || {});
+      fs.renameSync(oldJobs, path.join(from, `jobs.late-${tag}.json`));
+      writeJson(oldJobs, back);
+    } catch {}
+  };
 
   // 1. Take the jobs away from the drop-in FIRST, then read the copy it can no longer change.
   fs.renameSync(oldJobs, renamedTo);
@@ -143,7 +162,8 @@ function runImport({ appData, dataDir, now = new Date() }) {
   for (const j of cfg.jobs) j.lastSkippedDue = Math.max(j.lastSkippedDue || 0, at);
   let oldLog = '';
   try { oldLog = fs.readFileSync(path.join(from, 'log.txt'), 'utf8'); } catch {}
-  const inProgress = runsInProgress(oldLog);
+  const inProgress = runsInProgress(oldLog, name =>
+    Math.max(0, ...cfg.jobs.filter(j => j.name === name).map(j => mtime(path.join(from, resultName(j.id))))));
   const held = {};
   for (const j of cfg.jobs) if (inProgress.has(j.name)) held[j.id] = { name: j.name, result: mtime(path.join(from, resultName(j.id))) };
 
@@ -159,24 +179,49 @@ function runImport({ appData, dataDir, now = new Date() }) {
   // 4. The import record the follow-up works from (see followUp).
   const files = {};
   for (const f of fs.readdirSync(from)) if (/^(seen|result)-.+\.json$/i.test(f)) files[f] = mtime(path.join(from, f));
-  writeJson(path.join(dataDir, RECORD), { from, at: now.toISOString(), renamedTo, grand: cfg.grand || null, files, held });
+  const lastRunAt = {};
+  for (const j of cfg.jobs) if (j.lastRun && j.lastRun.at) lastRunAt[j.id] = j.lastRun.at;
+  writeJson(path.join(dataDir, RECORD), { from, at: now.toISOString(), renamedTo, grand: cfg.grand || null, jobIds: cfg.jobs.map(j => j.id), lastRunAt, files, held });
 
   // 5. Join the logs, the drop-in's history first. Last, so a failed import never doubles it.
   const newLog = path.join(dataDir, 'log.txt');
   try { if (oldLog) fs.writeFileSync(newLog, oldLog + (fs.existsSync(newLog) ? fs.readFileSync(newLog, 'utf8') : '')); } catch {}
 
   // 6. A drop-in write that raced the rename may already have brought jobs.json back (the
-  //    engine isn't reading the new jobs.json yet, so the grand delta goes straight into it).
-  const swept = followUp({ dataDir, nowMs: at, addToGrand: delta => {
+  //    engine isn't reading the new jobs.json yet, so late changes go straight into it).
+  const swept = followUp({ dataDir, nowMs: at, mergeLate: late => {
     const c = readJson(newJobs) || cfg;
-    const g = c.grand || (c.grand = { since: now.toISOString() });
-    for (const [k, v] of Object.entries(delta)) if (k !== 'since') g[k] = (g[k] || 0) + v;
+    applyLate(c, late, at);
     writeJson(newJobs, c);
   } });
   return { ok: true, jobs: cfg.jobs.length, from, renamedTo, copied: copied.length, held: Object.values(held).map(h => h.name), swept };
 }
 
 const resultName = id => 'result-' + String(id).replace(/[^a-z0-9]/gi, '') + '.json';
+
+// Add numeric grand-total fields; never subtract (a negative delta is a misread, not a run).
+function addGrand(grand, delta) {
+  const g = Object.assign({}, grand || {});
+  for (const [k, v] of Object.entries(delta || {})) if (k !== 'since' && typeof v === 'number' && v > 0) g[k] = (g[k] || 0) + v;
+  if (!g.since && delta && delta.since) g.since = delta.since;
+  return g;
+}
+
+// Apply what followUp found in a jobs.json the drop-in wrote after the import (see followUp):
+// late.grand is ADDED; late.jobs carry newer lastRun/stats for jobs we have; late.added are
+// jobs created in Bedrock Panel after the import (they wait for their next slot here too).
+function applyLate(cfg, late, nowMs) {
+  cfg.grand = addGrand(cfg.grand, late.grand);
+  for (const lj of late.jobs || []) {
+    const ours = (cfg.jobs || []).find(j => j.id === lj.id);
+    if (ours) { ours.lastRun = lj.lastRun; ours.stats = lj.stats; }
+  }
+  for (const nj of late.added || []) {
+    cfg.jobs = cfg.jobs || [];
+    if (!cfg.jobs.some(j => j.id === nj.id)) cfg.jobs.push(Object.assign({}, nj, { lastSkippedDue: Math.max(nj.lastSkippedDue || 0, nowMs) }));
+  }
+  return cfg;
+}
 
 function mergeSeen(theirFile, ourFile) {
   const theirs = readJson(theirFile) || {}, ours = readJson(ourFile) || {};
@@ -188,9 +233,10 @@ function mergeSeen(theirFile, ourFile) {
 }
 
 // Called from the scheduler tick for FOLLOW_UP_MS after an import (and once by runImport).
-// addToGrand(delta) folds a late drop-in run's grand totals into this app's jobs.json.
+// mergeLate({grand, jobs, added}) folds late drop-in bookkeeping into this app's jobs.json
+// (applyLate does the merge; the caller owns reading/writing the file).
 // Returns a list of what it did (for the log), or null when there is no import to follow.
-function followUp({ dataDir, nowMs = Date.now(), addToGrand }) {
+function followUp({ dataDir, nowMs = Date.now(), mergeLate }) {
   const recFile = path.join(dataDir, RECORD);
   const rec = readJson(recFile);
   if (!rec || !rec.from) return null;
@@ -204,17 +250,33 @@ function followUp({ dataDir, nowMs = Date.now(), addToGrand }) {
   const jf = path.join(from, 'jobs.json');
   if (fs.existsSync(jf)) {
     const cfg = readJson(jf);
+    const known = new Set(rec.jobIds || []);
     if (cfg && Array.isArray(cfg.jobs) && cfg.jobs.length) {
-      fs.renameSync(jf, path.join(from, `jobs.migrated-${tag}-again.json`));
-      did.push(`Bedrock Panel's jobs.json came back with ${cfg.jobs.length} job(s) — renamed it away again so only FileBridge runs them`);
-    } else if (cfg) {
-      // A run that was in progress at import time finished and saved into an empty file.
-      const delta = {};
+      // A save that read jobs.json BEFORE the rename (a run ending, a UI edit) or a job added in
+      // the still-open Bedrock Panel page. Its grand totals started from the import-time totals,
+      // so only the growth since then is new; per-job bookkeeping newer than ours is taken; new
+      // jobs are imported. Then it is renamed away again so only FileBridge runs them.
+      const grandGrowth = {};
       for (const [k, v] of Object.entries(cfg.grand || {})) {
-        if (typeof v === 'number') delta[k] = v - ((rec.grand && typeof rec.grand[k] === 'number') ? rec.grand[k] : 0);
+        if (typeof v === 'number') grandGrowth[k] = v - ((rec.grand && typeof rec.grand[k] === 'number') ? rec.grand[k] : 0);
       }
-      if (Object.values(delta).some(v => v > 0)) { addToGrand(delta); did.push('added a late Bedrock Panel run to the grand totals'); }
-      rec.grand = cfg.grand || rec.grand;
+      const newer = cfg.jobs.filter(j => known.has(j.id) && j.lastRun && j.lastRun.at > ((rec.lastRunAt || {})[j.id] || ''));
+      const added = cfg.jobs.filter(j => !known.has(j.id));
+      mergeLate({ grand: grandGrowth, jobs: newer, added });
+      for (const j of newer) (rec.lastRunAt = rec.lastRunAt || {})[j.id] = j.lastRun.at;
+      for (const j of added) (rec.jobIds = rec.jobIds || []).push(j.id);
+      rec.grand = addGrand(rec.grand, grandGrowth);
+      fs.renameSync(jf, path.join(from, `jobs.migrated-${tag}-again.json`));
+      did.push(`Bedrock Panel's jobs.json came back with ${cfg.jobs.length} job(s) — took its newer run results` +
+        (added.length ? ` and ${added.length} job(s) added there after the import` : '') + ', and renamed it away again so only FileBridge runs them');
+    } else if (cfg) {
+      // A run that was in progress at import time finished: its save found no jobs.json and
+      // started from {jobs: []}, so this file's grand totals are that run alone — add them as-is.
+      if (Object.values(cfg.grand || {}).some(v => typeof v === 'number' && v > 0)) {
+        mergeLate({ grand: cfg.grand, jobs: [], added: [] });
+        rec.grand = addGrand(rec.grand, cfg.grand);
+        did.push('added a Bedrock Panel run that finished after the import to the grand totals');
+      }
       fs.renameSync(jf, path.join(from, `jobs.late-${tag}.json`));
     }
   }
@@ -250,4 +312,4 @@ function heldJobs(dataDir) {
   return new Set(Object.keys((rec && rec.held) || {}));
 }
 
-module.exports = { findImport, runImport, followUp, heldJobs, runsInProgress, panelDataDirs, countJobs, FOLLOW_UP_MS };
+module.exports = { findImport, runImport, followUp, applyLate, heldJobs, runsInProgress, panelDataDirs, countJobs, FOLLOW_UP_MS };
