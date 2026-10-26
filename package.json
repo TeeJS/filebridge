@@ -11,9 +11,10 @@
     "node": ">=18 <27"
   },
   "scripts": {
-    "start": "electron .",
-    "test": "node test.js",
-    "dist": "electron-builder --win"
+    "start": "node build-dpapi.js && electron .",
+    "build:dpapi": "node build-dpapi.js",
+    "test": "node test.js && node --test test/*.test.js",
+    "dist": "node build-dpapi.js && electron-builder --win"
   },
   "devDependencies": {
     "electron": "44.3.0",
@@ -27,6 +28,9 @@
     },
     "files": [
       "main.js",
+      "shell/*.js",
+      "shell/native/filebridge_dpapi.node",
+      "assets/icon.png",
       "server.js",
       "sync.js",
       "drive.js",
@@ -35,10 +39,14 @@
       "index.html",
       "package.json"
     ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "assets/icon.png"
     },
     "nsis": {
       "oneClick": false,
