@@ -1,0 +1,51 @@
+{
+  "name": "filebridge",
+  "productName": "FileBridge",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Bring files together from folders, Google Drive, and subscription sites into local folders, on a schedule.",
+  "main": "main.js",
+  "author": "TeeJS",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18 <27"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node test.js",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.teejs.filebridge",
+    "productName": "FileBridge",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "server.js",
+      "sync.js",
+      "drive.js",
+      "web.js",
+      "app.js",
+      "index.html",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "guid": "36a34d7f-ced7-44f9-ba8e-c5256911e1db",
+      "artifactName": "filebridge-setup-${version}.${ext}"
+    }
+  }
+}
