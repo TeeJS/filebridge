@@ -1,16 +1,16 @@
 'use strict';
-// FileBridge drop-in backend — job store, scheduler, and run queue around sync.js.
-// Runs in the Bedrock Panel host main process. Bridge contract: the page calls
+// FileBridge backend — job store, scheduler, and run queue around sync.js.
+// Runs in the FileBridge main process. Bridge contract: the page calls
 // /app-api/<action> -> handle(action, {query, body}); runs are async, the page polls `status`.
+// main.js routes filebridge://app/app-api/<action> here in-process (no socket).
 //
-// Jobs live in %APPDATA%\bedrock-panel\file-bridge\jobs.json — plain JSON, copy the file to
+// Jobs live in %APPDATA%\FileBridge\jobs.json — plain JSON, copy the file to
 // another machine to move your jobs. Structural edits back the file up first; the
 // per-run lastRun bookkeeping writes without backups so scheduled runs don't pile up .baks.
 //
-// Scheduling: the manifest's "serverAutoStart": true makes the host load this module at
-// startup, so cron schedules arm without the page being opened. On hosts predating that
-// flag, the module loads on the first /app-api call instead and "run if missed" catches
-// up anything that came due in the gap.
+// Scheduling: main.js loads this module at startup, so cron schedules arm without the
+// window being opened, and "run if missed" catches up anything that came due while the
+// app was not running.
 
 const fs = require('fs');
 const fsp = fs.promises;
@@ -20,10 +20,9 @@ const sync = require('./sync');
 const web = require('./web');
 const drive = require('./drive');
 
-// The host hands ctx.oauth (bound to THIS app's `app:file-bridge` provider) with every
-// handle() call — but never at autostart, so a scheduled Drive-API run on a cold host
-// needs one page visit first. Captured closures stay valid for the process lifetime.
-// (HANDOFF-server-boot-context.md asks the host to pass a context once at autostart.)
+// main.js hands ctx.oauth (the Google Drive sign-in) with every handle() call, and once
+// at startup, so scheduled Drive-API runs work before the window is opened.
+// Captured closures stay valid for the process lifetime.
 let hostOauth = null;
 const driveToken = async () => {
   if (!hostOauth) return null;
@@ -47,13 +46,9 @@ async function diskInfo(p) {
   return null;
 }
 
-// Bedrock Panel 0.9.2 renamed the host's %APPDATA% folder from Bedrock Panel to bedrock-panel and moved it (this
-// folder rode along). Use the new location; fall back to the old one only while the host is still pre-rename.
-const DATA_DIR = (() => {
-  const base = process.env.APPDATA || os.homedir();
-  const next = path.join(base, 'bedrock-panel', 'file-bridge'), legacy = path.join(base, 'Bedrock Panel', 'file-bridge');
-  return (!fs.existsSync(next) && fs.existsSync(legacy)) ? legacy : next;
-})();
+// main.js passes its own data folder (%APPDATA%\FileBridge) before loading this module. Never the
+// Bedrock Panel drop-in's folder: two schedulers on one jobs.json would run every job twice.
+const DATA_DIR = process.env.FILEBRIDGE_DATA_DIR || path.join(process.env.APPDATA || os.homedir(), 'FileBridge');
 const JOBS_PATH = path.join(DATA_DIR, 'jobs.json');
 const FILTERS_PATH = path.join(DATA_DIR, 'filters.json');
 const RULES_DIR = path.join(DATA_DIR, 'rules');
