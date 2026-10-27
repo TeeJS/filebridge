@@ -1,7 +1,16 @@
 # Releasing FileBridge
 
-Windows only. Built, tested and signed in GitHub Actions (`.github/workflows/release.yml`),
-copied from faction-wars-editor.
+Three platforms, one draft release:
+
+| OS | Arch | Built where | Signing |
+|---|---|---|---|
+| Windows | x64 | GitHub Actions `windows` job (`.github/workflows/release.yml`) | Azure Trusted Signing, OIDC (setup below) |
+| Linux | x64 only | GitHub Actions `linux` job: AppImage + .deb + SHA256 sums | none (see the Linux section) |
+| macOS | arm64 only | **locally on T.J.'s Mac**, uploaded to the same draft | Developer ID + notarization, already set up on that Mac (see the macOS section) |
+
+A tag push makes CI build Windows and Linux into a **draft**. The Mac build is then added to that
+draft. T.J. approves the release notes before anything is published. Nothing here needs T.J. to
+supply a password or secret.
 
 ## One-time setup (done once per repo)
 
