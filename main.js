@@ -35,9 +35,8 @@ protocol.registerSchemesAsPrivileged([
 const { DriveAuth } = require('./shell/oauth');
 const { createRouter } = require('./shell/router');
 
-// The login item passes --hidden on Windows and Linux. macOS ignores setLoginItemSettings' args, so
-// there a login launch carries no flag; whenReady asks the OS (wasOpenedAtLogin) instead.
-let START_HIDDEN = process.argv.includes('--hidden');
+// Every OS's login item passes --hidden (on macOS through a LaunchAgent; see loginItem below).
+const START_HIDDEN = process.argv.includes('--hidden');
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 const log = m => console.log(m);
 
@@ -104,11 +103,24 @@ function showWindow() {
 // Windows and macOS use Electron's login items. The portable Windows exe unpacks to %TEMP% and
 // runs from there, so it registers the exe the user actually launched (PORTABLE_EXECUTABLE_FILE),
 // not the temporary copy, whose path changes.
+// macOS ignores args on the main-app login item, and wasOpenedAtLogin reads false on a real
+// login launch, so there it registers the bundled LaunchAgent (build/launchagent), whose
+// ProgramArguments carry --hidden. The plist's Label must equal MAC_LOGIN_AGENT.
 const loginArgs = ['--hidden'];
+const MAC_LOGIN_AGENT = 'com.teejs.filebridge.login.plist';
 const loginItem = () => {
+  if (process.platform === 'darwin') return { type: 'agentService', serviceName: MAC_LOGIN_AGENT };
   const portable = process.env.PORTABLE_EXECUTABLE_FILE;
   return portable ? { path: portable, args: loginArgs } : { args: loginArgs };
 };
+// Builds before 2.0.1's agent registered the main app itself. Move such a user to the agent once,
+// so a login never launches FileBridge twice.
+function migrateMacLoginItem() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  if (!app.getLoginItemSettings().openAtLogin) return;
+  app.setLoginItemSettings({ openAtLogin: false });
+  app.setLoginItemSettings(Object.assign({ openAtLogin: true }, loginItem()));
+}
 const startAtLogin = {
   label: process.platform === 'win32' ? 'Start with Windows' : process.platform === 'darwin' ? 'Open at Login' : 'Start at login',
   get: () => app.getLoginItemSettings(loginItem()).openAtLogin,
@@ -196,7 +208,7 @@ if (!app.requestSingleInstanceLock()) {
     tray.setContextMenu(buildTrayMenu());
     tray.on('click', showWindow);
 
-    if (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin) START_HIDDEN = true;
+    try { migrateMacLoginItem(); } catch (e) { log('[login] ' + (e && e.message || e)); }
 
     // macOS: started at login, FileBridge is a background agent — a Dock icon and
     // an app menu for a window that does not exist are noise. showWindow() puts the Dock icon

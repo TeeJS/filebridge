@@ -95,7 +95,13 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": true
+      "notarize": true,
+      "extraFiles": [
+        {
+          "from": "build/launchagent/com.teejs.filebridge.login.plist",
+          "to": "Library/LaunchAgents/com.teejs.filebridge.login.plist"
+        }
+      ]
     },
     "afterAllArtifactBuild": "./build/verify-mac-build.js",
     "linux": {

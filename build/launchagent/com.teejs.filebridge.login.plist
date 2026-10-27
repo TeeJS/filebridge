@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS "Open at Login". Registered through SMAppService (main.js, type agentService), it is how
+     the login launch gets --hidden in argv: the main-app login item cannot carry arguments.
+     No KeepAlive: Quit must stay quit. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.teejs.filebridge.login</string>
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/FileBridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>FileBridge</string>
+    <string>--hidden</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.teejs.filebridge</string>
+  </array>
+</dict>
+</plist>

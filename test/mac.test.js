@@ -209,3 +209,24 @@ test('the entitlements plist is strict XML, not just plutil-clean', () => {
   assert.ok(!text.includes('<key>com.apple.security.app-sandbox</key>'),
     'the sandbox would stop the engine reaching the user’s folders after the picker closes');
 });
+
+// ── Open at Login ────────────────────────────────────────────────────────────
+// The LaunchAgent is the only way a mac login launch gets --hidden. Read as text so this runs
+// on every CI platform; the keys checked are flat <key>/<value> pairs.
+test('the login LaunchAgent passes --hidden, never relaunches on Quit, and is packaged where SMAppService looks', () => {
+  const name = 'com.teejs.filebridge.login.plist';
+  const plist = fs.readFileSync(path.join(__dirname, '..', 'build', 'launchagent', name), 'utf8')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  const value = key => (plist.match(new RegExp(`<key>${key}</key>\\s*(<(\\w+)[^>]*/>|<(\\w+)>[\\s\\S]*?</\\3>)`)) || [])[1];
+
+  assert.equal(value('Label'), `<string>${name.replace(/\.plist$/, '')}</string>`);
+  assert.equal(value('BundleProgram'), '<string>Contents/MacOS/FileBridge</string>');
+  assert.match(value('ProgramArguments'), /<string>FileBridge<\/string>\s*<string>--hidden<\/string>/);
+  assert.equal(value('RunAtLoad'), '<true/>');
+  assert.equal(value('KeepAlive'), undefined);
+  assert.match(value('AssociatedBundleIdentifiers'), /<string>com\.teejs\.filebridge<\/string>/);
+
+  const pkg = require('../package.json');
+  assert.deepEqual(pkg.build.mac.extraFiles, [{ from: `build/launchagent/${name}`, to: `Library/LaunchAgents/${name}` }]);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8'), new RegExp(`MAC_LOGIN_AGENT = '${name.replace(/\./g, '\\.')}'`));
+});
