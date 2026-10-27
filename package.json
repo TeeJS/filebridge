@@ -114,7 +114,7 @@
         }
       ],
       "category": "Utility",
-      "icon": "assets/icon.png",
+      "icon": "build/icons",
       "executableName": "filebridge",
       "syncDesktopName": true,
       "synopsis": "Scheduled folder, Google Drive and web-drop sync",
