@@ -35,3 +35,32 @@ Small updates are patch bumps (2.0.0 -> 2.0.1); ask before a minor bump.
 
 Copy `D:\Github\open-quake\repo\.signing` into the repo (gitignored), `Connect-AzAccount`, then
 `npm run dist`. `sign.js` signs each file through the same Trusted Signing library.
+
+## Linux (x64 AppImage + .deb)
+
+CI builds both in release.yml's `linux` job (ubuntu-latest), alongside SHA256SUMS-linux-<version>.txt, and the tag-push draft includes them. Nothing is signed: Linux users don't check a signature.
+
+Build and test on the Linux box (Kubuntu, KDE Wayland):
+
+```bash
+npm ci
+npm test
+npx electron-builder --linux --x64 --publish never   # or: npm run dist:linux
+# -> dist/filebridge-<version>-x86_64.AppImage, dist/filebridge_<version>_amd64.deb
+npx electron-builder --linux dir                     # quick unpacked build: dist/linux-unpacked/filebridge
+```
+
+Installing needs sudo, so the person at the keyboard runs it. Use the absolute path, and use apt rather than `dpkg -i`, because apt resolves the Ubuntu 24.04+ `t64` library names:
+
+```bash
+sudo apt install /home/tschmitz/github/filebridge/dist/filebridge_<version>_amd64.deb
+sudo apt remove filebridge
+```
+
+Things that have already cost time:
+- The AppImage needs FUSE 2. On Ubuntu 24.04+ it exits with a libfuse error until `libfuse2t64` is installed. Run it with `--appimage-extract-and-run` to test without it. The .deb is the recommended download.
+- Don't set `deb.afterInstall`/`afterRemove`. They replace electron-builder's stock scripts, which set up chrome-sandbox and the AppArmor profile that Ubuntu 24.04+ needs.
+- Don't add `build.linux.files`. A platform files list replaces the global `build.files`.
+- Keep the top-level `desktopName` (`filebridge.desktop`). Without it KDE/GNOME show the wrong taskbar icon.
+- Stock Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`; test the .deb with it on.
+- Don't test shutdown with `timeout`. It signals twice, and Chromium force-exits on the second signal. A single SIGTERM (logout, `kill`) shuts down cleanly.
