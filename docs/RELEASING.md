@@ -117,6 +117,7 @@ Things that have already cost time:
 - The AppImage needs FUSE 2. On Ubuntu 24.04+ it exits with a libfuse error until `libfuse2t64` is installed. Run it with `--appimage-extract-and-run` to test without it. The .deb is the recommended download.
 - Don't set `deb.afterInstall`/`afterRemove`. They replace electron-builder's stock scripts, which set up chrome-sandbox and the AppArmor profile that Ubuntu 24.04+ needs.
 - Don't add `build.linux.files`. A platform files list replaces the global `build.files`.
+- Keep `linux.icon` pointing at `build/icons/` (16–512px PNGs). A single 1024px icon installs only into hicolor/1024x1024, which the icon theme doesn't index, so the launcher shows no icon.
 - Keep the top-level `desktopName` (`filebridge.desktop`). Without it KDE/GNOME show the wrong taskbar icon.
 - Stock Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`; test the .deb with it on.
 - Don't test shutdown with `timeout`. It signals twice, and Chromium force-exits on the second signal. A single SIGTERM (logout, `kill`) shuts down cleanly.
