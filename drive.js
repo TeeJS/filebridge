@@ -58,7 +58,7 @@ async function apiJson(deps, url) {
   for (let attempt = 0; ; attempt++) {
     if (deps.shouldStop && deps.shouldStop()) throw new Error('stopped');
     const token = await deps.getToken();
-    if (!token) throw new Error('Google Drive is not connected — use Connect Google Drive in the editor');
+    if (!token) throw new Error('Google Drive is not connected — click Connect (or Set up…) on the Google Drive chip under Accounts');
     const res = await f(url, { headers: { Authorization: 'Bearer ' + token } });
     if (res.ok) return res.json();
     const body = await res.text().catch(() => '');
@@ -69,7 +69,7 @@ async function apiJson(deps, url) {
       await new Promise(r => setTimeout(r, wait)); wait = Math.min(wait * 2, 16000);
       continue;
     }
-    if (res.status === 401) throw new Error('Google Drive rejected the connection (401) — reconnect Google Drive in the editor');
+    if (res.status === 401) throw new Error('Google Drive rejected the connection (401) — click Connect on the Google Drive chip under Accounts to sign in again');
     if (res.status === 403) throw new Error('Google Drive refused access (403) — the account may lack access to this folder, or the Drive API quota is exhausted: ' + body.slice(0, 200));
     if (res.status === 404) throw new Error('Drive folder or file not found (404) — the link may be wrong or access was removed');
     throw new Error('Drive API error HTTP ' + res.status + ': ' + body.slice(0, 200));

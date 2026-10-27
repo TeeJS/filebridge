@@ -308,7 +308,7 @@ async function pump() {
     // locally like any folder job.
     const folderId = sync.parseDriveLink(stored.source);
     if (!folderId) { failRun('Drive API mode needs a Google Drive folder link as the source'); return; }
-    if (!hostOauth) { failRun('the Google Drive connection is not available yet — open the FileBridge page once after a host restart, then run again'); return; }
+    if (!hostOauth) { failRun('the Google Drive sign-in is not available yet — restart FileBridge, then run again'); return; }
     try {
       job = { ...stored, folderId, dest: sync.expandTokens(stored.dest, when) };
       if (sync.parseDriveLink(stored.dest)) throw new Error('Drive API mode reads the source — the destination must be a local folder');
