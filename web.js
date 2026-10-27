@@ -501,6 +501,9 @@ async function runWebJob(job, rule, opts) {
   } finally {
     ses.removeListener('will-download', onDownload);
     try { win.destroy(); } catch {}
+    // The pages browsed during a run fill the partition's HTTP cache (hundreds of MB on C:
+    // for an image-heavy site). Drop it after every run; cookies — the saved sign-in — stay.
+    try { await ses.clearCache(); } catch {}
   }
   return summary;
 }
