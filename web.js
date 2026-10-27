@@ -164,6 +164,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const MAX_RESUMES = 5;
 const STALL_MS = Number(process.env.FILEBRIDGE_STALL_MS) || 3 * 60 * 1000; // env override for tests
 const SETTLE_CAP_MS = 2 * 60 * 60 * 1000;
+const fmtDuration = ms => (ms >= 60000 ? Math.round(ms / 60000) + ' min' : Math.round(ms / 1000) + ' s');
 function sizeOf(item) {
   const mb = n => (n / 1048576).toFixed(1) + ' MB';
   const got = item.getReceivedBytes(), total = item.getTotalBytes();
@@ -230,6 +231,7 @@ async function runWebJob(job, rule, opts) {
     item.once('done', (_e, state) => {
       p.lastEvent = Date.now();
       p.doneReports++;
+      if (item.fbStalled) { try { fs.rmSync(part, { force: true }); } catch {} return; } // already reported as stalled
       if (state === 'completed') {
         try { fs.renameSync(part, file); } // replaces an older (or earlier cut-off) copy
         catch (e) { p.failedDownloads++; p.failures.push(name + ': downloaded but could not be saved — ' + e.message); return; }
@@ -508,17 +510,17 @@ async function runWebJob(job, rule, opts) {
             for (const it of p.items) {
               const st = it.getState();
               if (st === 'progressing' || st === 'interrupted') {
-                p.failures.push(`${sanitizeName(it.getFilename() || 'download')}: stalled at ${sizeOf(it)} (no data for ${Math.round(STALL_MS / 60000)} min)`);
+                p.failures.push(`${sanitizeName(it.getFilename() || 'download')}: stalled at ${sizeOf(it)} (no data for ${fmtDuration(STALL_MS)})`);
+                it.fbStalled = true; // its 'done' (cancelled) must not be reported a second time
                 try { it.cancel(); } catch {}
               }
             }
             pending = null;
-            if (p.failures.length) opts.log(`ERROR ${job.name}: ${itemPath} — ` + p.failures.join('; '));
             if (!p.files.length) throw new Error(p.failures.length ? 'download failed — ' + p.failures.join('; ') : 'no file was downloaded');
             // Partial success is NOT recorded as seen — the whole item retries next run
             // (already-fetched files just get overwritten), so nothing is silently missing.
             if (clickFailures || p.failedDownloads || p.failures.length) {
-              throw new Error((clickFailures + p.failures.length) + ' of ' + Math.max(expected, p.items.length) + ' downloads failed — the item will retry next run');
+              throw new Error((clickFailures + p.failures.length) + ' of ' + Math.max(expected, p.items.length) + ' downloads failed — the item will retry next run' + (p.failures.length ? ' (' + p.failures.join('; ') + ')' : ''));
             }
             summary.bytes += p.files.reduce((a, f) => a + (f.bytes || 0), 0);
             for (const f of p.files) summary.downloaded.push({ collection: collName, item: name, file: f.file, bytes: f.bytes });
