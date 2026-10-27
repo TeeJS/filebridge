@@ -609,15 +609,19 @@ async function makeReadOnly(p) {
 }
 
 // Google-native formats on a Drive mount (.gdoc etc.): listed as tiny placeholder FILES,
-// but the Drive filesystem opens them as directory-like objects, so copyfile fails with
-// EISDIR (Drive's spelling) or EPERM (NTFS's spelling for a directory source). They have
-// no copyable content (just a pointer into Google's cloud) — that failure is a benign
-// skip, not an error. The same codes on anything else stay errors.
+// but the Drive filesystem opens them as directory-like objects, so copyfile fails. Each
+// platform spells that failure differently: EISDIR (Drive's own), EPERM (NTFS, for a
+// directory source) and ENOTSUP (macOS copyfile(3) — measured on macOS 27/APFS, where the
+// message even reads "operation not supported on socket"). They have no copyable content
+// (just a pointer into Google's cloud), so that failure is a benign skip, not an error.
+// The same codes on anything else stay errors.
 const GOOGLE_PLACEHOLDER = /\.(gdoc|gsheet|gslides|gdraw|gform|gtable|gjam|gmap|gsite|gscript|glink)$/i;
 async function isPlaceholderFailure(e, rel, srcPath) {
   if (!GOOGLE_PLACEHOLDER.test(rel)) return false;
   if (e.code === 'EISDIR') return true; // Drive lies in stat too — trust the open failure
-  if (e.code !== 'EPERM' && e.code !== 'EACCES') return false;
+  // The rest are ambiguous on their own (a real permission problem spells itself the same
+  // way), so confirm against stat before turning an error into a skip.
+  if (e.code !== 'EPERM' && e.code !== 'EACCES' && e.code !== 'ENOTSUP') return false;
   return fsp.stat(srcPath).then(s => s.isDirectory()).catch(() => false);
 }
 
