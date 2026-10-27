@@ -105,7 +105,7 @@ function showWindow() {
 // not the temporary copy, whose path changes.
 // macOS ignores args on the main-app login item, and wasOpenedAtLogin reads false on a real
 // login launch, so there it registers the bundled LaunchAgent (build/launchagent), whose
-// ProgramArguments carry --hidden. The plist's Label must equal MAC_LOGIN_AGENT.
+// ProgramArguments carry --hidden. The plist's Label is MAC_LOGIN_AGENT without .plist.
 const loginArgs = ['--hidden'];
 const MAC_LOGIN_AGENT = 'com.teejs.filebridge.login.plist';
 const loginItem = () => {
@@ -181,7 +181,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   // A second launch (double-click, Start menu) shows this instance's window — once it is ready.
-  app.on('second-instance', () => { app.whenReady().then(showWindow); });
+  // A login launch does not: on macOS, registering the login agent runs it at once (RunAtLoad),
+  // so ticking Open at Login would otherwise pop the window.
+  app.on('second-instance', (e, argv) => { if (!argv.includes('--hidden')) app.whenReady().then(showWindow); });
 
   // macOS: a running app does not relaunch. Clicking its Dock icon or picking it in the app
   // switcher fires 'activate' instead, so without this, closing the window (which hides it)
