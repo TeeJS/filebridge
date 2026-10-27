@@ -67,6 +67,9 @@ async function pickFolder(defaultPath) {
 }
 
 function showWindow() {
+  // macOS: a --hidden start drops the Dock icon (see whenReady). Opening the window is the
+  // point at which FileBridge stops being a background agent, so put it back.
+  if (process.platform === 'darwin' && app.dock) app.dock.show();
   if (win) {
     if (win.isMinimized()) win.restore();
     win.show();
@@ -124,9 +127,16 @@ let hideToTray = true;
 // On Linux a tray needs a StatusNotifierWatcher on the session bus (KDE always, GNOME only with
 // the AppIndicator extension); shell/tray-detect.js asks. Elsewhere it is always true.
 const canHideToTray = () => require('./shell/tray-detect').trayAvailable();
-// SEAM (mac): the menu-bar icon wants a monochrome template image; the mac asset replaces this.
-const trayImage = () => nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
-// SEAM (mac): app.on('activate') and the Dock icon when started --hidden go next to whenReady.
+// The menu bar tints a template image itself, so macOS gets a black-on-transparent glyph
+// (assets/trayTemplate.png, with the @2x beside it picked up automatically) instead of the
+// colour app icon squeezed to 16px. Without this it does not invert against a light menu bar
+// or under the tinted modes, and the downscale is soft on Retina.
+const trayImage = () => {
+  if (process.platform !== 'darwin') return nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
+  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'trayTemplate.png'));
+  img.setTemplateImage(true);
+  return img;
+};
 
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
@@ -159,6 +169,11 @@ if (!app.requestSingleInstanceLock()) {
   // A second launch (double-click, Start menu) shows this instance's window — once it is ready.
   app.on('second-instance', () => { app.whenReady().then(showWindow); });
 
+  // macOS: a running app does not relaunch. Clicking its Dock icon or picking it in the app
+  // switcher fires 'activate' instead, so without this, closing the window (which hides it)
+  // left the Dock icon dead and only the menu bar could bring FileBridge back.
+  app.on('activate', () => { app.whenReady().then(showWindow); });
+
   app.whenReady().then(async () => {
     hideToTray = await canHideToTray().catch(() => false);
     // A moved AppImage leaves its autostart entry pointing at the old path; repoint it while on.
@@ -178,6 +193,12 @@ if (!app.requestSingleInstanceLock()) {
     tray.setToolTip('FileBridge');
     tray.setContextMenu(buildTrayMenu());
     tray.on('click', showWindow);
+
+    // macOS: started at login with --hidden, FileBridge is a background agent — a Dock icon and
+    // an app menu for a window that does not exist are noise. showWindow() puts the Dock icon
+    // back the moment the user opens it from the menu bar. (mac always has a menu bar, so the
+    // no-tray branch below never runs there and cannot fight this.)
+    if (process.platform === 'darwin' && START_HIDDEN && app.dock) app.dock.hide();
 
     // Started hidden at login with no tray to reopen from: start minimized instead, so the app
     // is still reachable from the taskbar.

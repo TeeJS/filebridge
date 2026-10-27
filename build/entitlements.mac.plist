@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Chromium's V8 needs writable-executable memory; the hardened runtime forbids it
+       unless these three are declared. Every Electron app that notarizes needs them. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- FileBridge copies into and out of folders the user picks in the open panel, and the
+       engine then reads and writes them on a schedule with no panel open. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+
+  <!-- Deliberately NOT here:
+       - com.apple.security.app-sandbox. A sandboxed app can only reach what the user picked
+         in this launch; FileBridge's whole job is to keep syncing those folders afterwards.
+         This is a Developer ID build for direct download, not a Mac App Store build.
+       - com.apple.security.cs.disable-library-validation. Bedrock Panel needs it because an
+         ad-hoc signature cannot validate its own nested binaries. FileBridge is signed with
+         a Developer ID and ships no .node module on macOS (build-dpapi.js exits early off
+         Windows), so there is nothing nested for it to excuse. Verified: the app launches
+         and passes codesign --strict without it. -->
+</dict>
+</plist>

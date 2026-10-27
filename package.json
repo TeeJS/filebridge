@@ -14,7 +14,10 @@
     "start": "node build-dpapi.js && electron .",
     "build:dpapi": "node build-dpapi.js",
     "test": "node test.js && node --test test/*.test.js",
-    "dist": "node build-dpapi.js && electron-builder --win"
+    "dist": "node build-dpapi.js && electron-builder --win",
+    "dist:win": "node build-dpapi.js && electron-builder --win",
+    "dist:mac": "node build/mac-build.js",
+    "dist:linux": "electron-builder --linux"
   },
   "devDependencies": {
     "electron": "44.3.0",
@@ -31,6 +34,8 @@
       "shell/*.js",
       "shell/native/filebridge_dpapi.node",
       "assets/icon.png",
+      "assets/trayTemplate.png",
+      "assets/trayTemplate@2x.png",
       "server.js",
       "status.js",
       "import.js",
@@ -66,7 +71,32 @@
     },
     "portable": {
       "artifactName": "filebridge-portable-${version}.${ext}"
-    }
+    },
+    "mac": {
+      "artifactName": "filebridge-${version}-mac-${arch}.${ext}",
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "afterAllArtifactBuild": "./build/verify-mac-build.js"
   },
   "dependencies": {
     "dbus-next": "0.10.2"
