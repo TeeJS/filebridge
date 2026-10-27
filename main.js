@@ -109,15 +109,21 @@ const startAtLogin = {
   get: () => app.getLoginItemSettings(loginItem()).openAtLogin,
   set: on => app.setLoginItemSettings(Object.assign({ openAtLogin: on }, loginItem())),
 };
-// SEAM (Linux): Electron has no login items on Linux. shell/autostart-linux.js replaces get/set
-// here (an XDG autostart .desktop entry pointing at $APPIMAGE or the installed binary).
+// Electron has no login items on Linux: there it is an XDG autostart .desktop entry pointing at
+// $APPIMAGE or the installed binary (shell/autostart-linux.js).
+if (process.platform === 'linux') {
+  const xdg = require('./shell/autostart-linux').createAutostart({ args: loginArgs });
+  startAtLogin.get = xdg.get;
+  startAtLogin.set = xdg.set;
+  startAtLogin.refresh = xdg.refresh;
+}
 
 // ── tray ───────────────────────────────────────────────────────────────────────
 // Whether closing the window can hide to a tray. Decided once at startup (see whenReady).
 let hideToTray = true;
-// SEAM (Linux): shell/tray-detect.js decides this on Linux — GNOME without the AppIndicator
-// extension has no tray, so there close must minimize instead.
-const canHideToTray = async () => true;
+// On Linux a tray needs a StatusNotifierWatcher on the session bus (KDE always, GNOME only with
+// the AppIndicator extension); shell/tray-detect.js asks. Elsewhere it is always true.
+const canHideToTray = () => require('./shell/tray-detect').trayAvailable();
 // SEAM (mac): the menu-bar icon wants a monochrome template image; the mac asset replaces this.
 const trayImage = () => nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
 // SEAM (mac): app.on('activate') and the Dock icon when started --hidden go next to whenReady.
@@ -155,6 +161,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     hideToTray = await canHideToTray().catch(() => false);
+    // A moved AppImage leaves its autostart entry pointing at the old path; repoint it while on.
+    if (app.isPackaged && startAtLogin.refresh) { try { startAtLogin.refresh(); } catch {} }
     driveAuth = new DriveAuth({
       file: path.join(process.env.FILEBRIDGE_DATA_DIR, 'oauth.json'),
       openExternal: async url => { await shell.openExternal(url); return true; },
@@ -171,7 +179,10 @@ if (!app.requestSingleInstanceLock()) {
     tray.setContextMenu(buildTrayMenu());
     tray.on('click', showWindow);
 
+    // Started hidden at login with no tray to reopen from: start minimized instead, so the app
+    // is still reachable from the taskbar.
     if (!START_HIDDEN) showWindow();
+    else if (!hideToTray) { showWindow(); win.minimize(); }
   }).catch(e => {
     // Never linger as an invisible process holding the single-instance lock.
     dialog.showErrorBox('FileBridge could not start', String((e && e.stack) || e));
