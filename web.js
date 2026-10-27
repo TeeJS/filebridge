@@ -164,6 +164,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const MAX_RESUMES = 5;
 const STALL_MS = Number(process.env.FILEBRIDGE_STALL_MS) || 3 * 60 * 1000; // env override for tests
 const SETTLE_CAP_MS = 2 * 60 * 60 * 1000;
+const STALL_RETRIES = 2; // fresh requests for a stalled file before the item waits for the next run
 const fmtDuration = ms => (ms >= 60000 ? Math.round(ms / 60000) + ' min' : Math.round(ms / 1000) + ' s');
 function sizeOf(item) {
   const mb = n => (n / 1048576).toFixed(1) + ' MB';
@@ -217,7 +218,9 @@ async function runWebJob(job, rule, opts) {
     const name = sanitizeName(item.getFilename() || 'download');
     p.names.push(name); // surfaced in the run status so the user sees WHICH file is downloading
     const file = path.join(p.dir, name);
-    const part = file + '.part';
+    // Unique per download: a stalled file is re-requested (below) under the same name, and the
+    // cancelled attempt's cleanup must never touch the new attempt's file.
+    const part = file + '.' + p.items.length + '.part';
     item.setSavePath(part);
     let resumes = 0;
     item.on('updated', (_e, state) => {
@@ -492,8 +495,12 @@ async function runWebJob(job, rule, opts) {
             // A download is judged by PROGRESS, not a fixed time: it may take as long as it
             // needs while bytes keep arriving, and ends as stalled after STALL_MS with none
             // (interrupted downloads get resumed meanwhile — see onDownload).
+            // A stalled file (connection open, no data — what a server-side hiccup looks like) is
+            // cancelled and requested afresh right away, up to STALL_RETRIES times, before the
+            // item is given up until the next run.
             const received = () => p.items.reduce((a, it) => a + it.getReceivedBytes(), 0);
-            let lastBytes = received(), lastProgress = Date.now();
+            const live = it => { const st = it.getState(); return st === 'progressing' || st === 'interrupted'; };
+            let lastBytes = received(), lastProgress = Date.now(), stallRetries = 0;
             const settleCap = Date.now() + SETTLE_CAP_MS;
             while (Date.now() < settleCap) {
               if (stop()) throw new Error('stopped');
@@ -501,8 +508,19 @@ async function runWebJob(job, rule, opts) {
               if (!inFlight && Date.now() - p.lastEvent >= 1500) break;
               const now = received();
               if (now !== lastBytes) { lastBytes = now; lastProgress = Date.now(); }
-              else if (inFlight && Date.now() - lastProgress >= STALL_MS) break;
-              opts.setPhase('item', itemPath + namesLabel() + ' — ' + p.doneReports + '/' + p.items.length + ' downloads finished');
+              else if (inFlight && Date.now() - lastProgress >= STALL_MS) {
+                if (stallRetries >= STALL_RETRIES) break;
+                stallRetries++;
+                for (const it of p.items.filter(live)) {
+                  opts.log(`${job.name}: ${sanitizeName(it.getFilename() || 'download')} stalled at ${sizeOf(it)} — requesting it again (${stallRetries} of ${STALL_RETRIES})`);
+                  const url = it.getURL();
+                  it.fbStalled = true; // its 'done' (cancelled) is not a failure: a fresh attempt replaces it
+                  try { it.cancel(); } catch {}
+                  try { win.webContents.downloadURL(url); } catch {}
+                }
+                lastProgress = Date.now();
+              }
+              opts.setPhase('item', itemPath + namesLabel() + ' — ' + p.files.length + '/' + Math.max(expected, 1) + ' downloads finished');
               await sleep(300);
             }
             // Anything still unfinished is stalled: cancel it (a stalled DownloadItem otherwise keeps
