@@ -35,7 +35,9 @@ protocol.registerSchemesAsPrivileged([
 const { DriveAuth } = require('./shell/oauth');
 const { createRouter } = require('./shell/router');
 
-const START_HIDDEN = process.argv.includes('--hidden');
+// The login item passes --hidden on Windows and Linux. macOS ignores setLoginItemSettings' args, so
+// there a login launch carries no flag; whenReady asks the OS (wasOpenedAtLogin) instead.
+let START_HIDDEN = process.argv.includes('--hidden');
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 const log = m => console.log(m);
 
@@ -194,7 +196,9 @@ if (!app.requestSingleInstanceLock()) {
     tray.setContextMenu(buildTrayMenu());
     tray.on('click', showWindow);
 
-    // macOS: started at login with --hidden, FileBridge is a background agent — a Dock icon and
+    if (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin) START_HIDDEN = true;
+
+    // macOS: started at login, FileBridge is a background agent — a Dock icon and
     // an app menu for a window that does not exist are noise. showWindow() puts the Dock icon
     // back the moment the user opens it from the menu bar. (mac always has a menu bar, so the
     // no-tray branch below never runs there and cannot fight this.)
