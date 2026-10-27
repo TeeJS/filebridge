@@ -62,7 +62,7 @@ async function run(j) {
   assert(sync.validateJob(job({ schedule: { type: 'weekly', at: '03:00', days: [] } })));
 
   // ── cross-platform paths: what counts as a full path is per OS ──
-  assert.equal(sync.validateJob(job({ source: '\\\\server\\share\\docs' }), 'win32'), null); // UNC ok on Windows
+  assert.equal(sync.validateJob(job({ source: '\\\\server\\share\\docs', dest: 'D:\\Backup' }), 'win32'), null); // UNC ok on Windows
   assert(sync.isAbsPath('C:\\x', 'win32') && sync.isAbsPath('\\\\nas\\share', 'win32') && !sync.isAbsPath('/home/x', 'win32'));
   assert(sync.isAbsPath('/home/x', 'linux') && sync.isAbsPath('/Volumes/x', 'darwin') && !sync.isAbsPath('C:\\x', 'linux'));
   assert(sync.validateJob(job({ source: 'C:\\x' }), 'linux'), 'a Windows path is not a full path on Linux');
@@ -275,9 +275,13 @@ async function run(j) {
   write(TGT, 'inner.txt', 'I');
   write(SRC, 'MiXeD.lnk', 'x');
   write(DST, 'mixed/inner.txt', 'I');
-  r = await runLnk(job({ followShortcuts: true, mirror: true }), lnkResolver({ 'MiXeD.lnk': TGT }));
-  assert(!r.plan.actions.some(a => a.op === 'deldir' || a.op === 'del'), 'mirror must not delete a case-drifted expansion');
-  assert(exists(DST, 'mixed/inner.txt'));
+  // Only meaningful where the volume folds case (NTFS, default APFS): on ext4 "mixed" is a
+  // different folder from "MiXeD", and mirroring it away is correct.
+  if (fs.existsSync(path.join(DST, 'MIXED'))) {
+    r = await runLnk(job({ followShortcuts: true, mirror: true }), lnkResolver({ 'MiXeD.lnk': TGT }));
+    assert(!r.plan.actions.some(a => a.op === 'deldir' || a.op === 'del'), 'mirror must not delete a case-drifted expansion');
+    assert(exists(DST, 'mixed/inner.txt'));
+  }
   // a shortcut pointing at the DESTINATION (or into it) is refused, not expanded
   reset();
   write(SRC, 'Backup.lnk', 'x');
@@ -578,8 +582,9 @@ async function run(j) {
   assert.equal(sync.resolveDriveLink('https://drive.google.com/drive/folders/' + gid2, [MOUNT]), path.join(MOUNT, gid2), 'multiple children fall back to the id dir');
   assert.throws(() => sync.resolveDriveLink('https://drive.google.com/drive/folders/1MissingIdAaBbCc1111111111111', [MOUNT]), /shortcut/i, 'missing id explains the Add-shortcut step');
   assert.throws(() => sync.resolveDriveLink(durl, []), /Drive for Desktop/i, 'no mount explains Drive for Desktop');
-  assert.equal(sync.validateJob(job({ source: durl })), null, 'Drive link accepted as source');
-  assert.equal(sync.validateJob(job({ dest: durl })), null, 'Drive link accepted as destination');
+  // Mount-resolved links are a Windows feature (off Windows they need Drive API mode; covered above).
+  assert.equal(sync.validateJob(job({ source: durl, dest: 'D:\\Backup' }), 'win32'), null, 'Drive link accepted as source');
+  assert.equal(sync.validateJob(job({ source: 'D:\\Data', dest: durl }), 'win32'), null, 'Drive link accepted as destination');
   assert(sync.validateJob(job({ source: durl, dest: durl + '?usp=x' })), 'same Drive folder both sides rejected');
 
   // ── missing source is a clean failure, not a hang ──
