@@ -5,6 +5,7 @@
   "private": true,
   "description": "Bring files together from folders, Google Drive, and subscription sites into local folders, on a schedule.",
   "main": "main.js",
+  "desktopName": "filebridge.desktop",
   "author": "TeeJS",
   "license": "MIT",
   "engines": {
@@ -96,7 +97,53 @@
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": true
     },
-    "afterAllArtifactBuild": "./build/verify-mac-build.js"
+    "afterAllArtifactBuild": "./build/verify-mac-build.js",
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Utility",
+      "icon": "assets/icon.png",
+      "executableName": "filebridge",
+      "syncDesktopName": true,
+      "synopsis": "Scheduled folder, Google Drive and web-drop sync",
+      "desktop": {
+        "entry": {
+          "Name": "FileBridge",
+          "Categories": "Utility;",
+          "StartupWMClass": "filebridge"
+        }
+      },
+      "maintainer": "TeeJS <4136437+TeeJS@users.noreply.github.com>"
+    },
+    "appImage": {
+      "artifactName": "filebridge-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "artifactName": "filebridge_${version}_${arch}.${ext}",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    }
   },
   "dependencies": {
     "dbus-next": "0.10.2"
