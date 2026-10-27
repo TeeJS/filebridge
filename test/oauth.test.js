@@ -6,9 +6,20 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const { DriveAuth } = require('../shell/oauth');
-const dpapi = require('../shell/dpapi');
+const { createSecrets } = require('../shell/secrets');
 
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+
+// In-memory stand-in for the OS secret store, so these tests run on any OS and on headless CI
+// (no keyring). Blobs are opaque (no plaintext); anything not made by protect() fails to open.
+function fakeSecrets({ available = true } = {}) {
+  return {
+    available: () => available,
+    reason: () => (available ? '' : 'no keyring is running (test)'),
+    protect: s => (available && typeof s === 'string' ? 'enc:' + Buffer.from(s).toString('base64').split('').reverse().join('') : null),
+    unprotect: b => (typeof b === 'string' && b.startsWith('enc:') ? Buffer.from(b.slice(4).split('').reverse().join(''), 'base64').toString() : null),
+  };
+}
 
 function setup(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-oauth-'));
@@ -19,6 +30,7 @@ function setup(opts = {}) {
   const responses = opts.responses || [];
   const auth = new DriveAuth({
     file,
+    secrets: opts.secrets || fakeSecrets(),
     openExternal: async url => { opened.push(url); return true; },
     // A response is a token body, { status, body } for an HTTP error, or a function (may throw / await).
     fetchImpl: async (url, init) => {
@@ -43,7 +55,57 @@ const listening = port => new Promise(resolve => {
   s.on('error', () => resolve(false));
 });
 
-test('the DPAPI binding is built', () => { assert.ok(dpapi.available(), 'run node build-dpapi.js'); });
+// ── the per-OS secret store (shell/secrets.js) ──
+test('Windows: the DPAPI binding is built and round-trips', { skip: process.platform !== 'win32' }, () => {
+  const s = createSecrets();
+  assert.ok(s.available(), 'run node build-dpapi.js');
+  assert.equal(s.unprotect(s.protect('hello')), 'hello');
+});
+
+function fakeSafeStorage({ ok = true, backend } = {}) {
+  const ss = {
+    isEncryptionAvailable: () => ok,
+    encryptString: s => Buffer.from('x' + s),
+    decryptString: b => { const t = b.toString(); if (!t.startsWith('x')) throw new Error('bad'); return t.slice(1); },
+  };
+  if (backend) ss.getSelectedStorageBackend = () => backend;
+  return ss;
+}
+
+test('macOS: safeStorage (Keychain) with no backend API is available', () => {
+  const s = createSecrets({ platform: 'darwin', safeStorage: fakeSafeStorage() });
+  assert.ok(s.available());
+  assert.equal(s.unprotect(s.protect('tok')), 'tok');
+  assert.equal(s.unprotect(Buffer.from('garbage').toString('base64')), null, 'a blob it cannot open is null, not a throw');
+});
+
+test('Linux: libsecret/KWallet ok; basic_text (no keyring) is refused with a reason', () => {
+  assert.ok(createSecrets({ platform: 'linux', safeStorage: fakeSafeStorage({ backend: 'kwallet6' }) }).available());
+  assert.ok(createSecrets({ platform: 'linux', safeStorage: fakeSafeStorage({ backend: 'gnome_libsecret' }) }).available());
+  const plain = createSecrets({ platform: 'linux', safeStorage: fakeSafeStorage({ backend: 'basic_text' }) });
+  assert.equal(plain.available(), false);
+  assert.equal(plain.protect('tok'), null, 'never stores in plain text');
+  assert.match(plain.reason(), /keyring/);
+});
+
+test('no keyring: Connect refuses before any browser opens', async () => {
+  const { auth, opened } = setup({ secrets: fakeSecrets({ available: false }) });
+  await assert.rejects(() => auth.connect([SCOPE], { clientId: 'cid', clientSecret: 's' }), /keyring/);
+  assert.equal(opened.length, 0);
+  assert.equal(auth.server, null, 'no listener opened');
+});
+
+test('a sign-in the store can no longer open (mac re-sign, another machine) reads as not connected', () => {
+  const { auth, file } = setup();
+  auth.setClient('cid', 'sec');
+  auth.setTokens({ accessToken: 'A', refreshToken: 'R', expiresAt: null, scope: SCOPE });
+  const o = JSON.parse(fs.readFileSync(file, 'utf8'));
+  o.tokens = 'enc:corrupted!!'; // what an orphaned Keychain item looks like from here
+  fs.writeFileSync(file, JSON.stringify(o));
+  assert.doesNotThrow(() => auth.status());
+  assert.equal(auth.status().connected, false);
+  assert.equal(auth.status().configured, true);
+});
 
 test('connect needs a client ID', async () => {
   const { auth } = setup();
@@ -219,7 +281,7 @@ test('two Connect clicks share one listener, and it closes', async () => {
 
 test('a browser that cannot be opened closes the listener at once', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-oauth-'));
-  const auth = new DriveAuth({ file: path.join(dir, 'oauth.json'), openExternal: async () => { throw new Error('no browser'); } });
+  const auth = new DriveAuth({ file: path.join(dir, 'oauth.json'), secrets: fakeSecrets(), openExternal: async () => { throw new Error('no browser'); } });
   auth.setClient('cid', 's');
   await assert.rejects(() => auth.connect([SCOPE]), /Could not open/);
   assert.equal(auth.server, null);

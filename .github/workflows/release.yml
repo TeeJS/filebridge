@@ -2,13 +2,15 @@ name: Release
 
 # Two ways to run it:
 #   - Actions tab -> Release -> "Run workflow" (a DRY RUN by default): tests, builds and signs
-#     Windows (Azure Artifact Signing) and keeps the result as a workflow artifact. No release.
-#   - Push a tag vX.Y.Z (matching package.json "version"): the same build, then a DRAFT release
-#     with the installer attached and release-notes/vX.Y.Z.md as its notes. Publish by hand.
+#     Windows (Azure Artifact Signing), builds Linux, and keeps both as workflow artifacts.
+#   - Push a tag vX.Y.Z (matching package.json "version"): the same builds, then a DRAFT release
+#     with them attached and release-notes/vX.Y.Z.md as its notes. Publish by hand.
+#
+# macOS is built, signed and notarized on the build Mac (Developer ID + notarytool profile, the
+# way Bedrock Panel ships) and its dmg/zip are uploaded to the same draft — see docs/RELEASING.md.
 #
 # Windows signs through the 'release' environment (variables AZURE_CLIENT_ID, AZURE_TENANT_ID,
-# AZURE_SUBSCRIPTION_ID; OIDC, no stored secret). Copied from faction-wars-editor; see
-# docs/RELEASING.md. FileBridge v2 is Windows-only.
+# AZURE_SUBSCRIPTION_ID; OIDC, no stored secret). Copied from faction-wars-editor.
 
 on:
   push:
@@ -77,8 +79,12 @@ jobs:
       - run: npm ci
       - name: Build the DPAPI module
         run: node build-dpapi.js
-      - name: Tests
-        run: npm test
+      # Two steps, so a failing engine self-check still lets the unit tests run and report.
+      - name: Engine self-checks
+        run: node test.js
+      - name: Unit tests
+        if: success() || failure()
+        run: node --test "test/*.test.js"
       - name: Package and sign
         run: npx electron-builder --win --publish never
       # sign.js leaves a file unsigned (with a warning) when its setup is missing, so
@@ -103,8 +109,41 @@ jobs:
             dist/*.blockmap
           if-no-files-found: error
 
+  # Linux x64: AppImage + deb (the package.json linux/deb blocks), unsigned — Linux has no
+  # gatekeeper — with SHA256 sums published beside them.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Engine self-checks
+        run: node test.js
+      - name: Unit tests
+        if: success() || failure()
+        run: node --test "test/*.test.js"
+      - name: Package
+        run: npx electron-builder --linux --x64 --publish never
+      - name: SHA256 sums
+        run: |
+          cd dist
+          ls *.AppImage *.deb
+          sha256sum *.AppImage *.deb > "SHA256SUMS-linux-$(node -p "require('../package.json').version").txt"
+          cat SHA256SUMS-linux-*.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/SHA256SUMS-linux-*.txt
+          if-no-files-found: error
+
   draft:
-    needs: [windows]
+    needs: [windows, linux]
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-latest
     permissions:

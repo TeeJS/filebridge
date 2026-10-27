@@ -4,8 +4,10 @@
 // - The loopback callback listens on an OS-assigned port ("start an HTTP listener on a random
 //   available port", Google's desktop-app guide) and only while a sign-in is pending; it closes
 //   after the callback or SIGN_IN_TIMEOUT_MS. It is the app's only listening socket.
-// - The client id/secret and tokens live in <data>\oauth.json; the secret and the token set are
-//   DPAPI-protected (shell/dpapi.js). A copy on another machine/user simply reads as not connected.
+// - The client id/secret and tokens live in <data>/oauth.json; the secret and the token set are
+//   encrypted per OS (shell/secrets.js: DPAPI on Windows, Keychain on macOS, libsecret/KWallet on
+//   Linux). A copy on another machine/user, or a blob a re-signed app can't open, reads as not
+//   connected — sign in again — never as an error.
 // - Tokens refresh on demand when a run asks for one; no background timers.
 // Exposes exactly the ctx.oauth shape server.js expects: status/connect/disconnect/getAccessToken.
 
@@ -13,7 +15,6 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
-const dpapi = require('./dpapi');
 
 const GOOGLE = {
   name: 'Google Drive',
@@ -37,8 +38,9 @@ const page = (color, text) => '<!doctype html><meta charset="utf-8"><title>FileB
   + '<body style="font:16px Segoe UI,sans-serif;background:#0d1117;color:' + color + '">' + text + '</body>';
 
 class DriveAuth {
-  constructor({ file, openExternal, log = () => {}, fetchImpl = fetch, now = Date.now, signInTimeoutMs = SIGN_IN_TIMEOUT_MS, retryDelaysMs = [1000, 4000] }) {
+  constructor({ file, openExternal, secrets, log = () => {}, fetchImpl = fetch, now = Date.now, signInTimeoutMs = SIGN_IN_TIMEOUT_MS, retryDelaysMs = [1000, 4000] }) {
     this.file = file;
+    this.secrets = secrets || require('./secrets').createSecrets();
     this.signInTimeoutMs = signInTimeoutMs;
     this.retryDelaysMs = retryDelaysMs; // waits between token-refresh attempts on a network error / 5xx
     this.openExternal = openExternal;
@@ -68,15 +70,15 @@ class DriveAuth {
   }
   settings() {
     const o = this.read();
-    return { clientId: String(o.clientId || ''), clientSecret: (o.clientSecret && dpapi.unprotectOne(o.clientSecret)) || '' };
+    return { clientId: String(o.clientId || ''), clientSecret: (o.clientSecret && this.secrets.unprotect(o.clientSecret)) || '' };
   }
   tokens() {
-    const plain = dpapi.unprotectOne(this.read().tokens);
+    const plain = this.secrets.unprotect(this.read().tokens);
     try { const t = plain ? JSON.parse(plain) : null; return t && typeof t === 'object' ? t : null; } catch { return null; }
   }
   setClient(clientId, clientSecret) {
-    const secret = clientSecret ? dpapi.protectOne(clientSecret) : '';
-    if (clientSecret && !secret) throw new Error('Google Drive settings could not be stored securely');
+    const secret = clientSecret ? this.secrets.protect(clientSecret) : '';
+    if (clientSecret && !secret) throw new Error('the Google Drive settings could not be stored securely: ' + (this.secrets.reason() || 'encryption failed'));
     const o = this.read();
     const sameClient = o.clientId === clientId;
     // Tokens belong to the client that issued them — a new client starts disconnected.
@@ -89,8 +91,8 @@ class DriveAuth {
   // gen: the generation a refresh started in; a stale one is dropped instead of written.
   setTokens(t, gen) {
     if (gen !== undefined && gen !== this.generation) return false;
-    const blob = dpapi.protectOne(JSON.stringify(Object.assign({}, t, { updatedAt: this.now() })));
-    if (!blob) throw new Error('Google Drive tokens could not be stored securely');
+    const blob = this.secrets.protect(JSON.stringify(Object.assign({}, t, { updatedAt: this.now() })));
+    if (!blob) throw new Error('the Google Drive sign-in could not be stored securely: ' + (this.secrets.reason() || 'encryption failed'));
     const o = this.read();
     o.tokens = blob;
     this.write(o);
@@ -120,6 +122,9 @@ class DriveAuth {
 
   // ── sign-in ──────────────────────────────────────────────────────────────────
   async connect(scopes, creds) {
+    // Refuse before any browser opens if the sign-in could not be kept safely afterwards
+    // (Linux with no keyring running) — never store it in plain text.
+    if (!this.secrets.available()) throw new Error('Google Drive can\'t be connected: ' + this.secrets.reason());
     if (creds && creds.clientId) this.setClient(String(creds.clientId), String(creds.clientSecret || ''));
     const { clientId } = this.settings();
     if (!clientId) throw new Error('Google Drive client ID is required');

@@ -20,6 +20,23 @@ function api(action, body) {
 }
 function msg(t, cls) { const m = $('#msg'); m.textContent = t || ''; m.className = cls || ''; }
 
+// The OS FileBridge runs on (from `list`): its path separator and example paths. Windows until
+// the first list arrives, which is also what every pre-2.0.1 build assumed.
+const HOST_EXAMPLES = {
+  win32: { source: 'C:\\Users\\you\\Documents — or paste a Google Drive folder link', dest: '\\\\server\\share\\Documents', webDest: 'D:\\Drops\\SiteName' },
+  darwin: { source: '/Users/you/Documents — or paste a Google Drive folder link', dest: '/Volumes/NAS/Documents', webDest: '/Users/you/Drops/SiteName' },
+  linux: { source: '/home/you/Documents — or paste a Google Drive folder link', dest: '/mnt/nas/Documents', webDest: '/home/you/Drops/SiteName' },
+};
+const host = { platform: 'win32', sep: '\\', examples: HOST_EXAMPLES.win32 };
+function applyHost(r) {
+  if (!r || !r.platform) return;
+  host.platform = r.platform;
+  host.sep = r.sep || (r.platform === 'win32' ? '\\' : '/');
+  host.examples = HOST_EXAMPLES[r.platform] || HOST_EXAMPLES.linux;
+  $('#fSource').placeholder = host.examples.source;
+  if (jobKind !== 'web') $('#fDest').placeholder = host.examples.dest; // runs after load (refreshList)
+}
+
 let jobs = [];
 let grand = null;
 let logCatsState = null; // which per-file categories get written to the activity log (from `list`)
@@ -242,6 +259,7 @@ async function refreshList() {
   for (const id of [...selected]) if (!jobs.some(j => j.id === id)) selected.delete(id); // drop deleted jobs
   $('#dataDir').textContent = r.dataDir || '';
   importOffer = r.importOffer || null;
+  applyHost(r);
   render();
   renderGrand();
   renderLastBand();
@@ -576,7 +594,7 @@ async function pathPreviews() {
   let target = dst.path;
   if (sub && !src.error && !src.api) {
     const base = String(src.path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
-    if (base) target = target.replace(/[\\/]+$/, '') + '\\' + base;
+    if (base) target = target.replace(/[\\/]+$/, '') + host.sep + base;
   }
   dEl.hidden = false; dEl.className = 'fhelp'; dEl.textContent = '→ ' + target;
 }
@@ -594,7 +612,7 @@ function setKind(k) {
   document.querySelectorAll('.folderOnly').forEach(el => { el.hidden = k === 'web'; });
   document.querySelectorAll('.webOnly').forEach(el => { el.hidden = k !== 'web'; });
   $('#kindHelp').textContent = k === 'web' ? 'Downloads new releases from a subscription site into the folder below.' : '';
-  $('#fDest').placeholder = k === 'web' ? 'D:\\Drops\\SiteName' : '\\\\server\\share\\Documents';
+  $('#fDest').placeholder = (k === 'web' ? host.examples.webDest : host.examples.dest);
   if (k === 'folder') { syncMirrorUi(); syncCompareUi(); pathPreviews(); } // re-apply their own hidden states
 }
 $('#fKind').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setKind(b.dataset.k); });
@@ -1300,8 +1318,8 @@ function renderRunbar() {
     return;
   }
   const p = current.progress || {};
-  const rel = p.rel ? String(p.rel).replace(/\//g, '\\') : '';
-  const full = (root, r) => String(root || '').replace(/[\\/]+$/, '') + '\\' + (r || '');
+  const rel = p.rel ? String(p.rel).replace(/\//g, host.sep) : '';
+  const full = (root, r) => String(root || '').replace(/[\\/]+$/, '') + host.sep + (r || '');
   const deleting = p.op === 'del' || p.op === 'deldir';
   $('#runName').textContent = current.name;
   $('#runStop').textContent = current.dryRun ? 'Stop preview' : 'Stop';

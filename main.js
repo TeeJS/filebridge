@@ -9,14 +9,22 @@
 const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, protocol, shell } = require('electron');
 const path = require('path');
 
-// Data folder first: %APPDATA%\FileBridge holds only FileBridge's own files (jobs, rules,
-// results, oauth.json, status). Chromium's cache/cookies go to %LOCALAPPDATA%\FileBridge\session.
+// Data folder first: the OS's per-user app-data folder + FileBridge (%APPDATA% on Windows,
+// ~/Library/Application Support on macOS, ~/.config on Linux) holds only FileBridge's own files
+// (jobs, rules, results, oauth.json, status). Chromium's cache/cookies go to the OS cache folder.
 // server.js reads FILEBRIDGE_DATA_DIR at load, so this must run before it is required.
 // A development run (`npm start`) uses FileBridge-dev, so it can never schedule the installed
 // app's real jobs (nor share its single-instance lock).
 const DATA_NAME = app.isPackaged ? 'FileBridge' : 'FileBridge-dev';
 app.setPath('userData', path.join(app.getPath('appData'), DATA_NAME));
-app.setPath('sessionData', path.join(process.env.LOCALAPPDATA || app.getPath('temp'), DATA_NAME, 'session'));
+// Web-drop sign-ins live in this session folder, so it must survive reboots: never a temp folder
+// (macOS purges its per-user temp dir; most Linux distros wipe /tmp at boot).
+function sessionDir() {
+  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || app.getPath('appData'), DATA_NAME, 'session');
+  if (process.platform === 'darwin') return path.join(app.getPath('home'), 'Library', 'Caches', DATA_NAME, 'session');
+  return path.join(process.env.XDG_CACHE_HOME || path.join(app.getPath('home'), '.cache'), DATA_NAME, 'session');
+}
+app.setPath('sessionData', sessionDir());
 process.env.FILEBRIDGE_DATA_DIR = app.getPath('userData');
 process.env.FILEBRIDGE_VERSION = app.getVersion(); // stamped into status.json
 
@@ -70,7 +78,9 @@ function showWindow() {
     autoHideMenuBar: true, backgroundColor: '#0d1117', title: 'FileBridge', icon: ICON,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
-  win.on('close', e => { if (!quitting) { e.preventDefault(); win.hide(); } });
+  // Close keeps FileBridge running: hidden to the tray where there is one, minimized where there
+  // isn't (a desktop with no tray would leave an invisible, unreachable app).
+  win.on('close', e => { if (!quitting) { e.preventDefault(); if (hideToTray) win.hide(); else win.minimize(); } });
   win.on('closed', () => { win = null; });
   // Windows sign-out / restart / shutdown: Electron emits no before-quit then, so unwind here
   // (stop the run cleanly, write running:false) and let the window close.
@@ -84,26 +94,43 @@ function showWindow() {
   win.loadURL('filebridge://app/index.html');
 }
 
-// "Start with Windows" only means something for a packaged build: in development it would
-// register electron.exe itself. The portable exe unpacks to %TEMP% and runs from there, so
-// register the portable exe the user actually launched (PORTABLE_EXECUTABLE_FILE, set by its
-// launcher), not the temporary copy, whose path changes.
+// ── Start at login, per OS ─────────────────────────────────────────────────────
+// Only meaningful for a packaged build: in development it would register electron itself.
+// Windows and macOS use Electron's login items. The portable Windows exe unpacks to %TEMP% and
+// runs from there, so it registers the exe the user actually launched (PORTABLE_EXECUTABLE_FILE),
+// not the temporary copy, whose path changes.
 const loginArgs = ['--hidden'];
 const loginItem = () => {
   const portable = process.env.PORTABLE_EXECUTABLE_FILE;
   return portable ? { path: portable, args: loginArgs } : { args: loginArgs };
 };
-const startsWithWindows = () => app.getLoginItemSettings(loginItem()).openAtLogin;
+const startAtLogin = {
+  label: process.platform === 'win32' ? 'Start with Windows' : process.platform === 'darwin' ? 'Open at Login' : 'Start at login',
+  get: () => app.getLoginItemSettings(loginItem()).openAtLogin,
+  set: on => app.setLoginItemSettings(Object.assign({ openAtLogin: on }, loginItem())),
+};
+// SEAM (Linux): Electron has no login items on Linux. shell/autostart-linux.js replaces get/set
+// here (an XDG autostart .desktop entry pointing at $APPIMAGE or the installed binary).
+
+// ── tray ───────────────────────────────────────────────────────────────────────
+// Whether closing the window can hide to a tray. Decided once at startup (see whenReady).
+let hideToTray = true;
+// SEAM (Linux): shell/tray-detect.js decides this on Linux — GNOME without the AppIndicator
+// extension has no tray, so there close must minimize instead.
+const canHideToTray = async () => true;
+// SEAM (mac): the menu-bar icon wants a monochrome template image; the mac asset replaces this.
+const trayImage = () => nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
+// SEAM (mac): app.on('activate') and the Dock icon when started --hidden go next to whenReady.
 
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
     { label: 'Open FileBridge', click: showWindow },
     { type: 'separator' },
     {
-      label: app.isPackaged ? 'Start with Windows' : 'Start with Windows (installed app only)',
-      type: 'checkbox', enabled: app.isPackaged, checked: app.isPackaged && startsWithWindows(),
+      label: app.isPackaged ? startAtLogin.label : startAtLogin.label + ' (installed app only)',
+      type: 'checkbox', enabled: app.isPackaged, checked: app.isPackaged && startAtLogin.get(),
       click: item => {
-        app.setLoginItemSettings(Object.assign({ openAtLogin: item.checked }, loginItem()));
+        startAtLogin.set(item.checked);
         tray.setContextMenu(buildTrayMenu());
       },
     },
@@ -126,7 +153,8 @@ if (!app.requestSingleInstanceLock()) {
   // A second launch (double-click, Start menu) shows this instance's window — once it is ready.
   app.on('second-instance', () => { app.whenReady().then(showWindow); });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    hideToTray = await canHideToTray().catch(() => false);
     driveAuth = new DriveAuth({
       file: path.join(process.env.FILEBRIDGE_DATA_DIR, 'oauth.json'),
       openExternal: async url => { await shell.openExternal(url); return true; },
@@ -138,7 +166,7 @@ if (!app.requestSingleInstanceLock()) {
     // sign-in up front (server.js captures ctx.oauth on any handle() call).
     getServer().handle('status', { oauth }).catch(e => log('[boot] ' + (e && e.message || e)));
 
-    tray = new Tray(nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 }));
+    tray = new Tray(trayImage());
     tray.setToolTip('FileBridge');
     tray.setContextMenu(buildTrayMenu());
     tray.on('click', showWindow);

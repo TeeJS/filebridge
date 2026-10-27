@@ -1,7 +1,7 @@
 {
   "name": "filebridge",
   "productName": "FileBridge",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Bring files together from folders, Google Drive, and subscription sites into local folders, on a schedule.",
   "main": "main.js",
@@ -67,5 +67,8 @@
     "portable": {
       "artifactName": "filebridge-portable-${version}.${ext}"
     }
+  },
+  "dependencies": {
+    "dbus-next": "0.10.2"
   }
 }
