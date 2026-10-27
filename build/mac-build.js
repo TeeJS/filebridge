@@ -42,6 +42,9 @@ function resolveIdentity(env, root = ROOT) {
   return { identity: '-', from: 'none found' };
 }
 
+// electron-builder's CSC_NAME is the certificate's common name, not the full identity string.
+const cscName = identity => String(identity).replace(/^Developer ID Application:\s*/i, '');
+
 function resolveNotary(env, root = ROOT) {
   const has = k => !!(env[k] && String(env[k]).trim());
   if (has('APPLE_KEYCHAIN_PROFILE')) return { env: {}, from: 'APPLE_KEYCHAIN_PROFILE' };
@@ -75,7 +78,13 @@ function main() {
   if (adhoc) console.warn('[build:mac] WARNING: no Developer ID found. This build cannot be released.');
 
   const env = Object.assign({}, process.env, notary ? notary.env : {});
-  if (!adhoc) env.CSC_NAME = identity;
+  if (!adhoc) {
+    // electron-builder matches CSC_NAME against the certificate's common name and refuses the
+    // full string: "Please remove prefix "Developer ID Application:" from the specified name".
+    // codesign, in build/notarize-dmg.js, wants the full identity — so keep both.
+    env.CSC_NAME = cscName(identity);
+    env.FILEBRIDGE_MAC_IDENTITY = identity;
+  }
 
   const args = ['electron-builder', '--mac', ...process.argv.slice(2)];
   const r = spawnSync('npx', args, { stdio: 'inherit', cwd: ROOT, env });
@@ -83,4 +92,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resolveIdentity, resolveNotary };
+module.exports = { resolveIdentity, resolveNotary, cscName };

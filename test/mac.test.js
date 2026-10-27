@@ -189,3 +189,23 @@ test('the menu-bar icons are a black-on-transparent template pair', () => {
     assert.equal(coloured, 0, `${name} must be black on transparent for macOS to tint it`);
   }
 });
+
+// Apple's entitlements parser is stricter than plutil, and the difference costs a whole
+// signing run: `plutil -lint` accepts a double hyphen inside an XML comment, AMFI rejects it,
+// and codesign then dies with "AMFIUnserializeXML: syntax error" on the first nested binary,
+// about a minute in. Catch it here instead.
+test('the entitlements plist is strict XML, not just plutil-clean', () => {
+  const file = path.join(__dirname, '..', 'build', 'entitlements.mac.plist');
+  const text = fs.readFileSync(file, 'utf8');
+
+  for (const m of text.matchAll(/<!--([\s\S]*?)-->/g)) {
+    assert.ok(!m[1].includes('--'),
+      `a double hyphen inside an XML comment is illegal and AMFI will refuse the file:\n  ...${m[1].slice(0, 120).trim()}...`);
+  }
+  assert.ok(!/<!--(?![\s\S]*?-->)/.test(text), 'unterminated XML comment');
+
+  // The keys we actually rely on, and the two we have deliberately left out.
+  assert.ok(text.includes('<key>com.apple.security.cs.allow-jit</key>'), 'V8 needs allow-jit under the hardened runtime');
+  assert.ok(!text.includes('<key>com.apple.security.app-sandbox</key>'),
+    'the sandbox would stop the engine reaching the user’s folders after the picker closes');
+});

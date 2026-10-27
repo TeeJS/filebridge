@@ -45,6 +45,53 @@ Small updates are patch bumps (2.0.0 -> 2.0.1); ask before a minor bump.
 Copy `D:\Github\open-quake\repo\.signing` into the repo (gitignored), `Connect-AzAccount`, then
 `npm run dist`. `sign.js` signs each file through the same Trusted Signing library.
 
+## macOS (arm64 dmg + zip)
+
+Built on T.J.'s Mac, not in CI, then uploaded to the draft the tag created. CI would need five
+Apple secrets in the repo; this Mac already has working credentials.
+
+**Do not ask T.J. for an Apple ID, password or team ID.** The certificate lives in the login
+keychain and the Apple ID plus app-specific password live inside a notarytool credential profile.
+Both are referenced by name, so nothing reads or stores a secret. Confirm with:
+
+```bash
+security find-identity -v -p codesigning                 # Developer ID Application: ...
+cat .signing/mac-identity .signing/notary-profile        # gitignored, per machine
+xcrun notarytool history --keychain-profile "$(cat .signing/notary-profile)"
+```
+
+### Build and upload
+
+```bash
+npm ci && npm test        # npm ci matters: a stale node_modules fails the pack step
+npm run dist:mac          # about ten minutes; two round trips to Apple
+spctl -a -t exec -vv "dist/mac-arm64/FileBridge.app"     # want: accepted, Notarized Developer ID
+xcrun stapler validate dist/filebridge-*-mac-arm64.dmg
+gh release upload vX.Y.Z dist/filebridge-*-mac-arm64.{dmg,zip} -R TeeJS/filebridge
+```
+
+`build/mac-build.js` prints the identity and credential source it chose in its first two lines.
+Read them. If the identity says `ad-hoc`, stop: that signature differs on every build, so macOS
+treats each build as a new app. `build/verify-mac-build.js` refuses to finish a build whose
+artifacts are not notarized — it checks the files, because `notarize: true` with no credentials
+logs a skip and exits 0.
+
+### Four traps, each of which cost a failed run
+
+- **`CSC_NAME` takes the common name only.** electron-builder refuses the
+  `Developer ID Application:` prefix and `codesign` requires it; `mac-build.js` sets both forms.
+- **No double hyphen inside an XML comment in `build/entitlements.mac.plist`.** `plutil -lint`
+  accepts it, Apple's AMFI parser does not, and codesign then fails on the first nested binary a
+  minute in — so it reads as a certificate problem rather than a typo. Guarded by
+  `test/mac.test.js`.
+- **electron-builder signs and notarizes the `.app` only**, leaving the `.dmg` unsigned, which
+  Gatekeeper rejects outright. `build/notarize-dmg.js` signs, submits, then staples the image, in
+  that order — signing invalidates an existing staple.
+- **Never add `build.mac.files`.** A per-platform list replaces the global `build.files`.
+
+After adding a dependency anywhere, `npm ci` before building, or the pack step fails with
+"production dependency not found".
+
 ## Linux (x64 AppImage + .deb)
 
 CI builds both in release.yml's `linux` job (ubuntu-latest), alongside SHA256SUMS-linux-<version>.txt, and the tag-push draft includes them. Nothing is signed: Linux users don't check a signature.
