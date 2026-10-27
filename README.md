@@ -120,6 +120,21 @@ API** (not the local mount).
 - **Google-native docs** with no export produce no file — they're reported as
   **skips**, not errors, exactly like the local mount.
 
+## Privacy
+
+FileBridge runs entirely on your own PC. It has no servers and no telemetry, and it collects
+and sends nothing about you to anyone.
+
+- **Google Drive** access is read-only (`drive.readonly`). It is used only to list and download
+  the folders your own jobs point at, into folders on your PC. FileBridge can't change, delete
+  or upload anything in your Drive.
+- Your Google sign-in is stored only on your PC, in `%APPDATA%\FileBridge\oauth.json`, encrypted
+  for your Windows account. **Disconnect** on the Google Drive chip revokes it with Google and
+  deletes it.
+- Web-drop site sign-ins stay in FileBridge's own browser profile on your PC.
+- FileBridge talks only to Google's APIs (for Drive jobs) and to the sites your web-drop jobs
+  name.
+
 ## Building
 
 Node 26 (`.nvmrc`), Windows, and the Visual Studio C++ build tools (for the small DPAPI
