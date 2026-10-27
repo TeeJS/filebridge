@@ -24,6 +24,10 @@ let jobs = [];
 let grand = null;
 let logCatsState = null; // which per-file categories get written to the activity log (from `list`)
 let rules = [], sessions = [];
+// The host OS (from `list`). Windows-only options are tagged .winOnly in index.html and hidden by CSS
+// off Windows (CSS, not [hidden], because setKind rewrites .folderOnly hidden flags).
+let platform = 'win32';
+const hasDriveMount = () => platform === 'win32';
 let driveInfo = null; // Google Drive API sign-in status ({available, configured, connected})
 let paused = false;   // global scheduler pause (manual runs still work)
 function renderPause() {
@@ -232,6 +236,7 @@ async function refreshList() {
   if (r.logCats) { logCatsState = r.logCats; renderLogCats(); }
   rules = r.rules || []; sessions = r.sessions || [];
   driveInfo = r.drive || null;
+  if (r.platform) { platform = r.platform; document.body.dataset.platform = platform; }
   paused = !!r.paused; renderPause();
   current = r.current; queueIds = r.queue || []; lastResults = r.lastResults || {};
   for (const id of [...selected]) if (!jobs.some(j => j.id === id)) selected.delete(id); // drop deleted jobs
@@ -537,9 +542,20 @@ document.querySelectorAll('.pickFolder').forEach(button => button.addEventListen
 // server with the same code the runs use, and the destination preview folds in the
 // source-named subfolder option, so what you see is exactly what a run will target.
 const isDriveLink = v => /drive\.google\.com|docs\.google\.com/i.test(v);
+// Off Windows there is no Drive for Desktop mount to resolve a link to (2.0.1): a Drive link
+// source reads through the Drive API instead (forced on below), and a Drive link dest is refused.
+const NO_MOUNT_DEST = 'Google Drive folder links can only be a destination on Windows (they need the Drive for Desktop mount). Use a local or network folder.';
+function syncDriveApiLock(srcIsLink) {
+  const cb = $('#fDriveApi');
+  const lock = !hasDriveMount() && srcIsLink;
+  if (lock) cb.checked = true;
+  cb.disabled = lock;
+}
 async function pathPreviews() {
-  const resolve = async v => {
+  syncDriveApiLock(isDriveLink($('#fSource').value.trim()));
+  const resolve = async (v, isDest) => {
     if (!isDriveLink(v)) return { path: v };
+    if (!hasDriveMount()) return isDest ? { error: NO_MOUNT_DEST } : { api: true };
     const r = await api('resolveLink', { url: v }).catch(() => null);
     return r && r.ok ? { path: r.path } : { error: (r && r.error) || 'could not resolve the link' };
   };
@@ -549,16 +565,16 @@ async function pathPreviews() {
   if (isDriveLink(srcV)) {
     sEl.hidden = false;
     sEl.className = 'fhelp' + (src.error ? ' warn' : '');
-    sEl.textContent = src.error || ('→ ' + src.path);
+    sEl.textContent = src.error || (src.api ? '→ read through the Google Drive API' : '→ ' + src.path);
   } else sEl.hidden = true;
   const dstV = $('#fDest').value.trim();
   const sub = $('#fSrcSub').checked;
   const dEl = $('#dstResolved');
   if (!isDriveLink(dstV) && !(sub && dstV)) { dEl.hidden = true; return; }
-  const dst = await resolve(dstV);
+  const dst = await resolve(dstV, true);
   if (dst.error) { dEl.hidden = false; dEl.className = 'fhelp warn'; dEl.textContent = dst.error; return; }
   let target = dst.path;
-  if (sub && !src.error) {
+  if (sub && !src.error && !src.api) {
     const base = String(src.path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
     if (base) target = target.replace(/[\\/]+$/, '') + '\\' + base;
   }
@@ -703,7 +719,7 @@ $('#fSave').addEventListener('click', async () => {
       driveApi: $('#fDriveApi').checked,
       exportNative: $('#fExportNative').checked,
       deleteBeforeCopy: $('#fDelBefore').checked,
-      followShortcuts: $('#fFollowLnk').checked,
+      followShortcuts: hasDriveMount() && $('#fFollowLnk').checked, // .lnk resolution is Windows-only
       mirrorMeta: $('#fMirrorMeta').checked,
       recycle: $('#fRecycle').checked, testSource: $('#fTestSrc').checked,
       include: splitGlobs($('#fInclude').value), exclude: splitGlobs($('#fExclude').value),

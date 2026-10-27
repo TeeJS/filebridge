@@ -20,6 +20,8 @@
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
+  /* Windows-only options (Drive for Desktop mount, .lnk shortcuts); app.js sets data-platform from `list`. */
+  body[data-platform]:not([data-platform="win32"]) .winOnly { display: none !important; }
   html, body { height: 100%; }
   body { margin: 0; color: var(--text); font-family: var(--sans); font-size: 15px;
          line-height: 1.45; background: var(--bg); overflow: hidden; }
@@ -519,16 +521,17 @@
     </div>
     <p class="fhelp folderOnly">Drive-API jobs only: converts Google-native documents as they copy — a Sheet becomes <b>.xlsx</b>, a Doc <b>.docx</b>, a Slides deck <b>.pptx</b> (named after the document). Off, they're skipped (they have no downloadable file). Google caps document export at 10 MB — larger ones report an error. Exported files are compared by modification time only (Drive gives no size or checksum for them).</p>
     <p class="fhelp folderOnly" id="dstResolved" hidden></p>
-    <p class="fhelp folderOnly">You can paste a <b>Google Drive folder link</b> — it resolves to your Drive for Desktop mount at run time (the folder needs a shortcut in your Drive: right-click → Organize → Add shortcut). Paths may contain date tokens that expand when the job runs — <b>D:\Backup\&lt;yyyy-mm-dd&gt;</b> becomes D:\Backup\2026-08-30. Tokens: <b>yyyy yy mm dd hh nn ss day month dow doy woy wom quarter</b>.</p>
+    <p class="fhelp folderOnly winOnly">You can paste a <b>Google Drive folder link</b> — it resolves to your Drive for Desktop mount at run time (the folder needs a shortcut in your Drive: right-click → Organize → Add shortcut).</p>
+    <p class="fhelp folderOnly">Paths may contain date tokens that expand when the job runs — <b>D:\Backup\&lt;yyyy-mm-dd&gt;</b> becomes D:\Backup\2026-08-30. Tokens: <b>yyyy yy mm dd hh nn ss day month dow doy woy wom quarter</b>.</p>
     <div class="frow folderOnly">
       <label class="fl">Options</label>
       <label class="chk"><input type="checkbox" id="fSub" checked> Include subfolders</label>
       <label class="chk"><input type="checkbox" id="fMirror"> Mirror deletions</label>
       <label class="chk"><input type="checkbox" id="fDelBefore"> Delete old copy before creating new</label>
-      <label class="chk"><input type="checkbox" id="fFollowLnk"> Follow shortcuts</label>
+      <label class="chk winOnly"><input type="checkbox" id="fFollowLnk"> Follow shortcuts</label>
       <label class="chk"><input type="checkbox" id="fMirrorMeta"> Match source timestamps &amp; read-only</label>
     </div>
-    <p class="fhelp folderOnly">Follow shortcuts copies what a .lnk points at — a Google Drive folder shortcut becomes a real folder (named like the shortcut) with the target's content — instead of copying the useless .lnk file itself.</p>
+    <p class="fhelp folderOnly winOnly">Follow shortcuts copies what a .lnk points at — a Google Drive folder shortcut becomes a real folder (named like the shortcut) with the target's content — instead of copying the useless .lnk file itself.</p>
     <p class="fhelp folderOnly">Match source timestamps &amp; read-only stamps each copied file <b>and folder</b> with the source's modified/access time and its read-only attribute (folder times are applied after copying, so they stick). Creation time can't be set from here on Windows, so it stays the copy date. Local folder jobs only.</p>
     <div class="frow folderOnly">
       <label class="fl">Copy</label>
