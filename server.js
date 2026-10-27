@@ -654,6 +654,8 @@ async function handleAction(action, ctx) {
     try { importOffer = panelImport.findImport({ appData: APP_DATA, dataDir: DATA_DIR }); } catch {}
     return {
       ok: true, jobs, grand: cfg.grand || null, dataDir: DATA_DIR, current, queue: queue.map(q => q.id), importOffer,
+      // The page shows paths with this OS's separator, and hides Windows-only options elsewhere.
+      platform: process.platform, sep: path.sep,
       rules: Object.values(rules).map(r => ({ site: r.site, name: r.name || r.site, match: r.match })),
       sessions, lastResults: slim(), drive: driveInfo, paused: !!cfg.paused, logCats: logCats(cfg),
     };
@@ -729,7 +731,7 @@ async function handleAction(action, ctx) {
     if (job.kind === 'web') {
       err = web.validateWebJob(job, loadRules());
       if (err && job.enabled === false) err = null;
-      if (!err) err = sync.validateJob({ name: 'x', source: 'C:\\x', dest: 'D:\\x', schedule: job.schedule || { type: 'manual' } });
+      if (!err) err = sync.validateSchedule(job.schedule || { type: 'manual' });
       if (!err) {
         const rule = web.findRule(job.url, loadRules());
         if (rule) job.site = rule.site; // cache the matched rule's site id for sessions/partition
@@ -927,7 +929,7 @@ async function handleAction(action, ctx) {
   // validate with the same code the scheduler uses and hand back the next few run times.
   if (action === 'sched') {
     const sc = body.schedule || {};
-    const err = sync.validateJob({ name: 'x', source: 'C:\\x', dest: 'D:\\x', schedule: sc });
+    const err = sync.validateSchedule(sc);
     if (err) return { ok: false, error: err };
     const next = [];
     let t = Date.now();

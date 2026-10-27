@@ -58,9 +58,36 @@ async function run(j) {
   assert(sync.validateJob(job({ dest: SRC })));                                  // same folder
   assert(sync.validateJob(job({ dest: path.join(SRC, 'inner') })));              // dest inside source
   assert(sync.validateJob(job({ source: path.join(DST, 'inner') })));            // source inside dest
-  assert.equal(sync.validateJob(job({ source: '\\\\server\\share\\docs' })), null); // UNC ok
   assert(sync.validateJob(job({ schedule: { type: 'interval', every: 0 } })));
   assert(sync.validateJob(job({ schedule: { type: 'weekly', at: '03:00', days: [] } })));
+
+  // ── cross-platform paths: what counts as a full path is per OS ──
+  assert.equal(sync.validateJob(job({ source: '\\\\server\\share\\docs' }), 'win32'), null); // UNC ok on Windows
+  assert(sync.isAbsPath('C:\\x', 'win32') && sync.isAbsPath('\\\\nas\\share', 'win32') && !sync.isAbsPath('/home/x', 'win32'));
+  assert(sync.isAbsPath('/home/x', 'linux') && sync.isAbsPath('/Volumes/x', 'darwin') && !sync.isAbsPath('C:\\x', 'linux'));
+  assert(sync.validateJob(job({ source: 'C:\\x' }), 'linux'), 'a Windows path is not a full path on Linux');
+  // Off Windows a Drive link has no mount: a link source needs Drive API mode, a link dest is refused.
+  const LINK = 'https://drive.google.com/drive/folders/1aQr78zcE_CjSjrYEdX3teeBxgCqteYGB';
+  assert(/Drive API/.test(sync.validateJob(job({ source: LINK, dest: '/home/you/drive' }), 'linux')), 'mount link source refused on Linux');
+  assert.equal(sync.validateJob(job({ source: LINK, dest: '/Users/you/drive', driveApi: true }), 'darwin'), null, 'Drive API link source ok on mac');
+  assert(/only be a destination on Windows/.test(sync.validateJob(job({ source: '/home/you/src', dest: LINK }), 'linux')));
+  assert.equal(sync.validateSchedule({ type: 'manual' }), null);
+  assert(sync.validateSchedule({ type: 'cron', expr: 'nope' }));
+
+  // ── case sensitivity is measured per folder, by identity (dev + ino), not just by name ──
+  {
+    const cdir = path.join(ROOT, 'casecheck');
+    fs.mkdirSync(cdir, { recursive: true });
+    fs.writeFileSync(path.join(cdir, 'Probe.txt'), 'x');
+    const measured = sync.foldsCaseAt(cdir);
+    assert.equal(typeof measured, 'boolean', 'a folder with a lettered entry can be measured');
+    let twin = false; // a real "probe.txt" sibling only exists on a case-sensitive volume
+    try { fs.writeFileSync(path.join(cdir, 'probe.txt'), 'y', { flag: 'wx' }); twin = true; } catch {}
+    if (twin) assert.equal(sync.foldsCaseAt(cdir), false, 'Probe.txt beside probe.txt = case-sensitive, not insensitive');
+    else assert.equal(measured, true, 'the flipped name resolved to the same file = case-insensitive');
+    assert.equal(sync.foldsCaseAt(path.join(ROOT, 'no-such-folder')), null, 'unmeasurable -> null (platform default applies)');
+    fs.rmSync(cdir, { recursive: true, force: true });
+  }
 
   // ── schedule math ──
   const at = (y, mo, d, h, mi) => new Date(y, mo, d, h, mi).getTime();
@@ -1137,11 +1164,12 @@ async function run(j) {
   assert.deepEqual(web.planCollections(['drop-360'], new Set(), 0), [], 'cap 0 fetches nothing');
   assert.equal(web.collectionKey('drops', 'drop-360'), 'drops:drop-360');
   // web-job validation: a URL that a rule matches + an absolute dest folder
-  assert.equal(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/drops', dest: 'D:\\Drops' }, ruleMap), null);
-  assert(web.validateWebJob({ name: 'w', url: 'https://unmatched.example/x', dest: 'D:\\Drops' }, ruleMap), 'unmatched URL rejected');
-  assert(web.validateWebJob({ name: 'w', url: 'ftp://demo-drops.example/', dest: 'D:\\Drops' }, ruleMap), 'https only');
+  const DROPS = path.join(ROOT, 'Drops'); // a full path on whatever OS runs the tests
+  assert.equal(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/drops', dest: DROPS }, ruleMap), null);
+  assert(web.validateWebJob({ name: 'w', url: 'https://unmatched.example/x', dest: DROPS }, ruleMap), 'unmatched URL rejected');
+  assert(web.validateWebJob({ name: 'w', url: 'ftp://demo-drops.example/', dest: DROPS }, ruleMap), 'https only');
   assert(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/', dest: 'relative' }, ruleMap));
-  assert(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/', dest: 'D:\\Drops', backfill: 1.5 }, ruleMap));
+  assert(web.validateWebJob({ name: 'w', url: 'https://demo-drops.example/', dest: DROPS, backfill: 1.5 }, ruleMap));
 
   // ── warnings tier: a timestamp-set failure is a WARNING, not an error ──
   // A file that copies fine but whose mtime can't be set must NOT fail the run — it lands

@@ -148,8 +148,9 @@ function validateWebJob(job, rules) {
   if (!job || !String(job.name || '').trim()) return 'a job name is required';
   if (!/^https:\/\/[^\s]+$/i.test(String(job.url || ''))) return 'paste the site page to watch as an https:// URL';
   if (!findRule(job.url, rules)) return 'no rule file matches this URL — add one under Rules (match its hostname)';
-  if (!/^[a-zA-Z]:[\\/]/.test(String(job.dest || '')) && !/^\\\\[^\\]/.test(String(job.dest || ''))) {
-    return 'destination must be a full path (C:\\… or \\\\server\\share\\…)';
+  const { isAbsPath } = require('./sync');
+  if (!isAbsPath(job.dest)) {
+    return process.platform === 'win32' ? 'destination must be a full path (C:\\… or \\\\server\\share\\…)' : 'destination must be a full path (starting with /)';
   }
   const bf = job.backfill;
   if (bf !== 'all' && bf != null && !(Number.isInteger(Number(bf)) && Number(bf) >= 0)) return 'backfill must be "all" or a whole number';

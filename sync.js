@@ -156,29 +156,76 @@ function resolveDriveLink(str, roots) {
   throw new Error('this Drive folder has no shortcut on the mount — in Drive, right-click the folder → Organize → Add shortcut, then run again');
 }
 
+// ── cross-platform paths and case ─────────────────────────────────────────────
+// A full path on this OS: C:\… or \\server\share\… on Windows, /… on macOS and Linux.
+function isAbsPath(p, platform = process.platform) {
+  const s = String(p || '');
+  if (platform === 'win32') return /^[a-zA-Z]:[\\/]/.test(s) || /^\\\\[^\\]/.test(s);
+  return s.startsWith('/');
+}
+function pathExample(platform = process.platform) {
+  return platform === 'win32' ? 'C:\\…, \\\\server\\share\\…' : platform === 'darwin' ? '/Users/you/…, /Volumes/…' : '/home/you/…, /mnt/…';
+}
+// Case-insensitive by default on Windows and macOS (APFS), sensitive on Linux — but that is only
+// a default: a case-sensitive APFS volume, an SMB share or an exFAT stick each have their own
+// rules, so foldsCaseAt() measures the folder actually used and this is the fallback.
+const platformFoldsCase = (platform = process.platform) => platform === 'win32' || platform === 'darwin';
+const flipCase = s => [...s].map(c => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('');
+// Does the filesystem holding `dir` treat names case-insensitively? Stats a child entry under its
+// case-flipped name and compares identity (dev + ino, BigInt — Windows file ids exceed 2^53): a
+// real sibling that differs only in case ("Foo" beside "foo") must not read as "insensitive".
+// Flips a CHILD's name rather than dir's own, because a mount point has its own rules, not its
+// parent's. Read-only — nothing is written. null when it can't tell (missing dir, no usable child).
+function foldsCaseAt(dir) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  const name = names.find(n => flipCase(n) !== n);
+  if (!name) return null;
+  let a;
+  try { a = fs.statSync(path.join(dir, name), { bigint: true }); } catch { return null; }
+  let b;
+  try { b = fs.statSync(path.join(dir, flipCase(name)), { bigint: true }); }
+  catch (e) { return e.code === 'ENOENT' ? false : null; }
+  if (!a.ino && !b.ino) return true; // filesystems without inode numbers: the flipped name resolved
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
 // ── job validation ────────────────────────────────────────────────────────────
-function isAbsWin(p) { return /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p); }
-function norm(p) { return path.resolve(String(p)).replace(/[\\/]+$/, '').toLowerCase(); }
+function norm(p, fold) { const s = path.resolve(String(p)).replace(/[\\/]+$/, ''); return fold ? s.toLowerCase() : s; }
 
 // Returns an error string or null. Nesting either path inside the other is refused:
 // dest-inside-source recurses forever, source-inside-dest + mirror deletes the source.
-function validateJob(job) {
+function validateJob(job, platform = process.platform) {
   if (!job || !String(job.name || '').trim()) return 'a job name is required';
   const src = String(job.source || '').trim(), dst = String(job.dest || '').trim();
   if (!src || !dst) return 'source and destination folders are both required';
   const srcDrive = parseDriveLink(src), dstDrive = parseDriveLink(dst);
-  if (!srcDrive && !isAbsWin(src)) return 'source must be a full path (C:\\…, \\\\server\\share\\…) or a Google Drive folder link';
-  if (!dstDrive && !isAbsWin(dst)) return 'destination must be a full path (C:\\…, \\\\server\\share\\…) or a Google Drive folder link';
+  if (!srcDrive && !isAbsPath(src, platform)) return 'source must be a full path (' + pathExample(platform) + ') or a Google Drive folder link';
+  if (!dstDrive && !isAbsPath(dst, platform)) return 'destination must be a full path (' + pathExample(platform) + ') or a Google Drive folder link';
   if (srcDrive && dstDrive && srcDrive === dstDrive) return 'source and destination are the same Drive folder';
+  // A Drive link is resolved through Google Drive for Desktop's Windows mount. Off Windows (2.0.1)
+  // only the Drive API can read one: a link source needs "Read source through the Drive API", and
+  // a link destination (the API only reads) is refused.
+  if (platform !== 'win32') {
+    if (dstDrive) return 'a Google Drive folder link can only be a destination on Windows — pick a local folder';
+    if (srcDrive && !job.driveApi) return 'on this computer a Google Drive folder link needs "Read source through the Drive API" turned on';
+  }
   if (!srcDrive && !dstDrive) {
     // Nesting/same-folder checks need real paths; Drive links get the same checks at run
     // time, after resolution (pump() re-validates the resolved job).
-    const a = norm(src), b = norm(dst);
+    const fold = foldsCaseAt(src) ?? foldsCaseAt(dst) ?? platformFoldsCase(platform);
+    const a = norm(src, fold), b = norm(dst, fold);
     if (a === b) return 'source and destination are the same folder';
     if (b.startsWith(a + path.sep)) return 'destination is inside the source folder';
     if (a.startsWith(b + path.sep)) return 'source is inside the destination folder';
   }
-  const sc = job.schedule || {};
+  return validateSchedule(job.schedule) || validateGlobs(job);
+}
+
+// The schedule part of validation on its own — the editor's live schedule preview needs it
+// without inventing placeholder folders (which were Windows-only paths).
+function validateSchedule(schedule) {
+  const sc = schedule || {};
   if (sc.type === 'cron') { try { parseCron(sc.expr); } catch (e) { return e.message; } }
   if (sc.type === 'interval' && !(Number(sc.every) >= 1)) return 'interval must be at least 1 minute';
   if (sc.type === 'every') {
@@ -194,6 +241,9 @@ function validateJob(job) {
   }
   if ((sc.type === 'daily' || sc.type === 'weekly') && !/^\d{2}:\d{2}$/.test(sc.at || '')) return 'a run time (HH:MM) is required';
   if (sc.type === 'weekly' && !(Array.isArray(sc.days) && sc.days.length)) return 'pick at least one weekday';
+  return null;
+}
+function validateGlobs(job) {
   try { compileGlobs(job.include); compileGlobs(job.exclude); } catch { return 'bad wildcard pattern'; }
   return null;
 }
@@ -372,21 +422,28 @@ async function plan(job, opts = {}) {
   // the shortcut's own name (minus .lnk). Resolution is injected by the host — only the
   // Windows shell can resolve a Drive placeholder .lnk (raw reads fail with EINVAL).
   const followLnk = job.followShortcuts === true && typeof opts.resolveShortcut === 'function';
+  // Case: measured per folder (foldsCaseAt), the platform default when it can't be. An empty or
+  // new destination can't be measured, and needs nothing that depends on it this run (no dest
+  // entries to conflate or mirror-delete). kS keys names on the source volume, kD on the dest.
+  const srcFold = foldsCaseAt(src) ?? platformFoldsCase();
+  const dstFold = foldsCaseAt(dst) ?? platformFoldsCase();
+  out.caseFold = { source: srcFold, dest: dstFold };
+  const kS = s => (srcFold ? String(s).toLowerCase() : String(s));
+  const kD = s => (dstFold ? String(s).toLowerCase() : String(s));
   // Dest-relative paths materialized through a shortcut: the mirror walk must treat them
-  // as present in the source, or it would delete what the expansion just copied. Keys are
-  // LOWERCASED — dest dirent casing can drift from the shortcut's (Windows is
-  // case-insensitive everywhere else in this file: globs, access checks, the loop chain).
+  // as present in the source, or it would delete what the expansion just copied. Keyed by
+  // kD — on a case-insensitive destination, dirent casing can drift from the shortcut's.
   const viaShortcut = new Set();
   // Expansion roots whose target could not be reached THIS run: the walk never learned
   // their children, so the mirror must skip the whole dest subtree, not just the root.
   const viaShortcutStale = new Set();
-  let dstKey = path.resolve(dst).toLowerCase();
-  try { dstKey = String(await fsp.realpath(dst)).toLowerCase(); } catch {} // dest may not exist yet
+  let dstKey = kD(path.resolve(dst));
+  try { dstKey = kD(await fsp.realpath(dst)); } catch {} // dest may not exist yet
 
   async function planFile(abs, rel, name, s, virtual) {
     out.scanned++;
     prog(rel); // every file — the UI shows the live Source/Destination path being examined
-    if (virtual) viaShortcut.add(rel.toLowerCase());
+    if (virtual) viaShortcut.add(kD(rel));
     if (exc.length && matches(exc, name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel); prog(rel, 'filtered'); return; }
     if (inc.length && !matches(inc, name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel); prog(rel, 'filtered'); return; }
     if (!s) {
@@ -414,7 +471,7 @@ async function plan(job, opts = {}) {
     const lnkRel = relDir ? relDir + '/' + lnkName : lnkName;
     // A real "X" beside "X.lnk" would land both at the same dest path — refuse the
     // ambiguity loudly instead of letting readdir order pick a silent winner.
-    if (siblings && siblings.has(base.toLowerCase())) {
+    if (siblings && siblings.has(kS(base))) {
       out.errors.push({ path: lnkRel, error: 'shortcut skipped — "' + base + '" already exists in the same folder' });
       return;
     }
@@ -423,17 +480,19 @@ async function plan(job, opts = {}) {
     // outage must never turn into a mirror wipe (same philosophy as testSource).
     let target = null;
     try { target = await opts.resolveShortcut(abs); } catch {}
-    if (!target) { viaShortcutStale.add(rel.toLowerCase()); out.errors.push({ path: lnkRel, error: 'shortcut target could not be resolved' }); return; }
+    if (!target) { viaShortcutStale.add(kD(rel)); out.errors.push({ path: lnkRel, error: 'shortcut target could not be resolved' }); return; }
     let ts;
     try { ts = await fsp.stat(target); }
-    catch { viaShortcutStale.add(rel.toLowerCase()); out.errors.push({ path: lnkRel, error: 'shortcut target is unreachable: ' + target }); return; }
+    catch { viaShortcutStale.add(kD(rel)); out.errors.push({ path: lnkRel, error: 'shortcut target is unreachable: ' + target }); return; }
     let real = target;
     try { real = await fsp.realpath(target); } catch {}
-    const key = String(real).toLowerCase();
+    const key = kS(real);
     // A shortcut into (or above) the DESTINATION would copy the destination into itself,
     // nesting one level deeper every scheduled run. The job validator can't see it —
-    // shortcut targets only exist at plan time — so refuse it here.
-    if (key === dstKey || dstKey.startsWith(key + path.sep) || key.startsWith(dstKey + path.sep)) {
+    // shortcut targets only exist at plan time — so refuse it here. Compared under the
+    // destination's case rules (the question is whether it IS the destination).
+    const tKey = kD(real);
+    if (tKey === dstKey || dstKey.startsWith(tKey + path.sep) || tKey.startsWith(dstKey + path.sep)) {
       out.errors.push({ path: lnkRel, error: 'shortcut points at the destination — skipped' });
       return;
     }
@@ -441,7 +500,7 @@ async function plan(job, opts = {}) {
       if (!sub) return; // a folder shortcut is a subfolder — top-level-only jobs skip it
       if (exc.length && matches(exc, base, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel + '/'); return; }
       if (chain.has(key)) { out.errors.push({ path: lnkRel, error: 'shortcut loop skipped — already visiting ' + target }); return; }
-      viaShortcut.add(rel.toLowerCase());
+      viaShortcut.add(kD(rel));
       const next = new Set(chain); next.add(key);
       await walkSrc(target, rel, next, true);
     } else {
@@ -460,13 +519,13 @@ async function plan(job, opts = {}) {
     if (mirrorMeta && relDir) {
       try { const fst = await fsp.stat(absDir); out.folderMeta.push({ rel: relDir, mtimeMs: fst.mtimeMs, atimeMs: fst.atimeMs, readonly: !(fst.mode & 0o200) }); } catch {}
     }
-    const siblings = followLnk ? new Set(entries.map(e => e.name.toLowerCase())) : null;
+    const siblings = followLnk ? new Set(entries.map(e => kS(e.name))) : null;
     for (const ent of entries) {
       if (stop()) return;
       if (opts.waitIfPaused) { await opts.waitIfPaused(); if (stop()) return; } // pause parks the source scan too
       const rel = relDir ? relDir + '/' + ent.name : ent.name;
       if (ent.isDirectory()) {
-        if (virtual) viaShortcut.add(rel.toLowerCase());
+        if (virtual) viaShortcut.add(kD(rel));
         if (exc.length && matches(exc, ent.name, rel)) { out.filtered++; if (collectFiltered) out.filteredList.push(rel + '/'); continue; }
         if (sub) await walkSrc(path.join(absDir, ent.name), rel, chain, virtual);
         continue;
@@ -485,7 +544,7 @@ async function plan(job, opts = {}) {
   {
     let rootKey = src;
     try { rootKey = await fsp.realpath(src); } catch {}
-    await walkSrc(src, '', new Set([String(rootKey).toLowerCase()]), false);
+    await walkSrc(src, '', new Set([kS(rootKey)]), false);
   }
 
   if (job.mirror && testSource && srcTopCount === 0) {
@@ -512,8 +571,8 @@ async function plan(job, opts = {}) {
         if (exc.length && matches(exc, ent.name, rel)) { out.mirrorProtected++; continue; }
         // A shortcut whose target was unreachable this run keeps its whole previous
         // expansion — a transient outage must never turn into a mirror wipe.
-        if (viaShortcutStale.has(rel.toLowerCase())) { out.mirrorProtected++; continue; }
-        let inSrc = viaShortcut.has(rel.toLowerCase()); // materialized via a followed shortcut = present
+        if (viaShortcutStale.has(kD(rel))) { out.mirrorProtected++; continue; }
+        let inSrc = viaShortcut.has(kD(rel)); // materialized via a followed shortcut = present
         if (!inSrc) { try { await fsp.access(path.join(src, rel)); inSrc = true; } catch {} }
         if (ent.isDirectory()) {
           if (!sub) continue; // top-level-only jobs never touch dest subfolders
@@ -532,8 +591,22 @@ async function plan(job, opts = {}) {
 // ── execute ───────────────────────────────────────────────────────────────────
 // Windows: overwriting or deleting a read-only file fails EPERM/EACCES — clear the
 // attribute and retry once, then record the error and keep going (a bad file must not
-// abort the whole job).
-async function unlock(p) { try { await fsp.chmod(p, 0o666); } catch {} }
+// abort the whole job). On macOS/Linux chmod sets real permission bits, so only the owner's
+// write bit is added — the rest of the mode (exec bits, group/other) is left as it was.
+async function unlock(p) {
+  try {
+    if (process.platform === 'win32') { await fsp.chmod(p, 0o666); return; }
+    const st = await fsp.stat(p);
+    await fsp.chmod(p, (st.mode & 0o7777) | 0o200);
+  } catch {}
+}
+// Read-only for the copy: on Windows the attribute; on macOS/Linux the write bits are cleared
+// relative to the file's existing mode rather than replacing it with 0o444.
+async function makeReadOnly(p) {
+  if (process.platform === 'win32') { await fsp.chmod(p, 0o444); return; }
+  const st = await fsp.stat(p);
+  await fsp.chmod(p, (st.mode & 0o7777) & ~0o222);
+}
 
 // Google-native formats on a Drive mount (.gdoc etc.): listed as tiny placeholder FILES,
 // but the Drive filesystem opens them as directory-like objects, so copyfile fails with
@@ -639,7 +712,7 @@ async function execute(job, actions, opts = {}) {
         catch (e) { res.warnings.push({ path: a.rel, warn: 'copied, but could not set the timestamp: ' + e.message }); } // the file IS copied — a warning, not a failure
         // Mirror the source's read-only attribute onto the copy (opt-in). Set LAST — the next
         // run's unlock() clears it before overwriting, so it never blocks a future copy.
-        if (mirrorMeta && a.readonly) { try { await fsp.chmod(to, 0o444); } catch (e) { res.warnings.push({ path: a.rel, warn: 'copied, but could not set the read-only attribute: ' + e.message }); } }
+        if (mirrorMeta && a.readonly) { try { await makeReadOnly(to); } catch (e) { res.warnings.push({ path: a.rel, warn: 'copied, but could not set the read-only attribute: ' + e.message }); } }
         res.copied++; res.bytes += a.size || 0;
       } else if (a.op === 'del' || a.op === 'deldir') {
         if (await removePath(to, a.rel)) { res.deleted++; if (a.op === 'deldir') res.foldersDeleted++; }
@@ -666,10 +739,12 @@ async function execute(job, actions, opts = {}) {
       // trip on a folder we just made read-only. The bit is harmless to file ops inside it.
       try { await fsp.utimes(dir, m.atimeMs != null ? new Date(m.atimeMs) : new Date(), new Date(m.mtimeMs)); }
       catch (e) { res.warnings.push({ path: m.rel, warn: 'could not set the folder timestamp: ' + e.message }); }
-      if (m.readonly) { try { await fsp.chmod(dir, 0o555); } catch (e) { res.warnings.push({ path: m.rel, warn: 'could not set the folder read-only attribute: ' + e.message }); } }
+      // Folder read-only is a cosmetic attribute on Windows, but on macOS/Linux a folder without
+      // its write bit refuses new files — the next run could not copy into it. Windows only.
+      if (m.readonly && process.platform === 'win32') { try { await fsp.chmod(dir, 0o555); } catch (e) { res.warnings.push({ path: m.rel, warn: 'could not set the folder read-only attribute: ' + e.message }); } }
     }
   }
   return res;
 }
 
-module.exports = { compileGlobs, matches, validateJob, resolveCompare, diffReason, parseCron, cronNext, nextOccurrence, expandTokens, parseDriveLink, resolveDriveLink, plan, execute, MTIME_TOLERANCE_MS };
+module.exports = { compileGlobs, matches, validateJob, validateSchedule, isAbsPath, foldsCaseAt, platformFoldsCase, resolveCompare, diffReason, parseCron, cronNext, nextOccurrence, expandTokens, parseDriveLink, resolveDriveLink, plan, execute, MTIME_TOLERANCE_MS };
