@@ -159,6 +159,17 @@ function validateWebJob(job, rules) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Downloads: how many times an interrupted file is resumed, how long a file may go without
+// receiving a byte before it counts as stalled, and the overall ceiling for one item's files.
+const MAX_RESUMES = 5;
+const STALL_MS = Number(process.env.FILEBRIDGE_STALL_MS) || 3 * 60 * 1000; // env override for tests
+const SETTLE_CAP_MS = 2 * 60 * 60 * 1000;
+function sizeOf(item) {
+  const mb = n => (n / 1048576).toFixed(1) + ' MB';
+  const got = item.getReceivedBytes(), total = item.getTotalBytes();
+  return total > 0 ? mb(got) + ' of ' + mb(total) : mb(got);
+}
+
 class NeedsLogin extends Error {
   constructor(site) { super('not signed in to ' + site + ' — open the sign-in window, log in, then run again'); this.needsLogin = true; }
 }
@@ -191,7 +202,12 @@ async function runWebJob(job, rule, opts) {
   // Download capture: the session outlives the run, so the listener MUST be removed in
   // the finally. Only downloads we asked for (pending != null) are accepted — anything
   // arriving between items (a stray from a timed-out click) is refused outright.
-  let pending = null; // { dir, items: [], names: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent }
+  // Each file is written to "<name>.part" and renamed only once Chromium reports it completed —
+  // a download that stalls or fails never leaves a cut-off file under its real name.
+  // A dropped connection does NOT end a download: Chromium marks it 'interrupted' (resumable) and
+  // waits to be told to resume — it never fires 'done' — so it is resumed here (a Range request
+  // from where it stopped), up to MAX_RESUMES times.
+  let pending = null; // { dir, items: [], names: [], files: [], failures: [], doneReports, failedDownloads, lastEvent }
   const onDownload = (event, item) => {
     if (!pending) { event.preventDefault(); return; }
     const p = pending;
@@ -200,12 +216,29 @@ async function runWebJob(job, rule, opts) {
     const name = sanitizeName(item.getFilename() || 'download');
     p.names.push(name); // surfaced in the run status so the user sees WHICH file is downloading
     const file = path.join(p.dir, name);
-    item.setSavePath(file);
+    const part = file + '.part';
+    item.setSavePath(part);
+    let resumes = 0;
+    item.on('updated', (_e, state) => {
+      p.lastEvent = Date.now();
+      if (state !== 'interrupted') return;
+      if (!item.canResume() || resumes >= MAX_RESUMES) return; // the stall watchdog below ends it
+      resumes++;
+      opts.log(`${job.name}: ${name} was interrupted at ${sizeOf(item)} — resuming (attempt ${resumes} of ${MAX_RESUMES})`);
+      setTimeout(() => { try { if (item.getState() === 'interrupted') item.resume(); } catch {} }, 2000 * resumes);
+    });
     item.once('done', (_e, state) => {
       p.lastEvent = Date.now();
       p.doneReports++;
-      if (state === 'completed') p.files.push({ file, bytes: item.getReceivedBytes() });
-      else p.failedDownloads++;
+      if (state === 'completed') {
+        try { fs.renameSync(part, file); } // replaces an older (or earlier cut-off) copy
+        catch (e) { p.failedDownloads++; p.failures.push(name + ': downloaded but could not be saved — ' + e.message); return; }
+        p.files.push({ file, bytes: item.getReceivedBytes() });
+      } else {
+        p.failedDownloads++;
+        p.failures.push(`${name}: ${state} at ${sizeOf(item)}`);
+        try { fs.rmSync(part, { force: true }); } catch {}
+      }
     });
   };
   ses.on('will-download', onDownload);
@@ -393,7 +426,7 @@ async function runWebJob(job, rule, opts) {
             const drill = allSel ? stepsRaw.filter(s => typeof s === 'string') : stepsRaw.slice(0, -1);
             const pagePath = new URL(win.webContents.getURL()).pathname;
             const samePage = () => { try { return new URL(win.webContents.getURL()).pathname === pagePath; } catch { return false; } };
-            const p = { dir, items: [], names: [], files: [], doneReports: 0, failedDownloads: 0, lastEvent: Date.now() };
+            const p = { dir, items: [], names: [], files: [], failures: [], doneReports: 0, failedDownloads: 0, lastEvent: Date.now() };
             pending = p;
             // Filenames become known only when a download actually starts (after any
             // server-side prep). Show the newest few in the status so it reads
@@ -453,22 +486,39 @@ async function runWebJob(job, rule, opts) {
               clickFailures += expected - p.items.length;
               opts.log(`ERROR ${job.name}: ${expected - p.items.length} download(s) never started for ${itemPath}`);
             }
-            // Settle: every accepted download reports done and nothing new arrives for
-            // 1.5 s. Stop-aware; generous cap because media packages can be large.
-            const settleCap = Date.now() + Math.max(timeout, 600000);
+            // Settle: every accepted download reports done and nothing new arrives for 1.5 s.
+            // A download is judged by PROGRESS, not a fixed time: it may take as long as it
+            // needs while bytes keep arriving, and ends as stalled after STALL_MS with none
+            // (interrupted downloads get resumed meanwhile — see onDownload).
+            const received = () => p.items.reduce((a, it) => a + it.getReceivedBytes(), 0);
+            let lastBytes = received(), lastProgress = Date.now();
+            const settleCap = Date.now() + SETTLE_CAP_MS;
             while (Date.now() < settleCap) {
               if (stop()) throw new Error('stopped');
               const inFlight = p.items.length > p.doneReports;
               if (!inFlight && Date.now() - p.lastEvent >= 1500) break;
+              const now = received();
+              if (now !== lastBytes) { lastBytes = now; lastProgress = Date.now(); }
+              else if (inFlight && Date.now() - lastProgress >= STALL_MS) break;
               opts.setPhase('item', itemPath + namesLabel() + ' — ' + p.doneReports + '/' + p.items.length + ' downloads finished');
               await sleep(300);
             }
+            // Anything still unfinished is stalled: cancel it (a stalled DownloadItem otherwise keeps
+            // its connection and its .part file), and say exactly where it stopped.
+            for (const it of p.items) {
+              const st = it.getState();
+              if (st === 'progressing' || st === 'interrupted') {
+                p.failures.push(`${sanitizeName(it.getFilename() || 'download')}: stalled at ${sizeOf(it)} (no data for ${Math.round(STALL_MS / 60000)} min)`);
+                try { it.cancel(); } catch {}
+              }
+            }
             pending = null;
-            if (!p.files.length) throw new Error('no file was downloaded');
+            if (p.failures.length) opts.log(`ERROR ${job.name}: ${itemPath} — ` + p.failures.join('; '));
+            if (!p.files.length) throw new Error(p.failures.length ? 'download failed — ' + p.failures.join('; ') : 'no file was downloaded');
             // Partial success is NOT recorded as seen — the whole item retries next run
             // (already-fetched files just get overwritten), so nothing is silently missing.
-            if (clickFailures || p.failedDownloads) {
-              throw new Error((clickFailures + p.failedDownloads) + ' of ' + terminal.length + ' downloads failed — the item will retry next run');
+            if (clickFailures || p.failedDownloads || p.failures.length) {
+              throw new Error((clickFailures + p.failures.length) + ' of ' + Math.max(expected, p.items.length) + ' downloads failed — the item will retry next run');
             }
             summary.bytes += p.files.reduce((a, f) => a + (f.bytes || 0), 0);
             for (const f of p.files) summary.downloaded.push({ collection: collName, item: name, file: f.file, bytes: f.bytes });
