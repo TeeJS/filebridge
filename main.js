@@ -84,10 +84,16 @@ function showWindow() {
   win.loadURL('filebridge://app/index.html');
 }
 
-// "Start with Windows" only means something for the installed app: in development it would
-// register electron.exe itself.
+// "Start with Windows" only means something for a packaged build: in development it would
+// register electron.exe itself. The portable exe unpacks to %TEMP% and runs from there, so
+// register the portable exe the user actually launched (PORTABLE_EXECUTABLE_FILE, set by its
+// launcher), not the temporary copy, whose path changes.
 const loginArgs = ['--hidden'];
-const startsWithWindows = () => app.getLoginItemSettings({ args: loginArgs }).openAtLogin;
+const loginItem = () => {
+  const portable = process.env.PORTABLE_EXECUTABLE_FILE;
+  return portable ? { path: portable, args: loginArgs } : { args: loginArgs };
+};
+const startsWithWindows = () => app.getLoginItemSettings(loginItem()).openAtLogin;
 
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
@@ -97,7 +103,7 @@ function buildTrayMenu() {
       label: app.isPackaged ? 'Start with Windows' : 'Start with Windows (installed app only)',
       type: 'checkbox', enabled: app.isPackaged, checked: app.isPackaged && startsWithWindows(),
       click: item => {
-        app.setLoginItemSettings({ openAtLogin: item.checked, args: loginArgs });
+        app.setLoginItemSettings(Object.assign({ openAtLogin: item.checked }, loginItem()));
         tray.setContextMenu(buildTrayMenu());
       },
     },

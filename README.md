@@ -14,9 +14,14 @@ schedule model, and one live progress/result view.
 
 ## Install
 
-Download `filebridge-setup-<version>.exe` from
-[Releases](https://github.com/TeeJS/filebridge/releases) and run it. The installer is
-signed (Azure Trusted Signing) and installs per-user — no administrator rights.
+Download from [Releases](https://github.com/TeeJS/filebridge/releases). Both are signed (Azure
+Trusted Signing):
+
+- `filebridge-setup-<version>.exe` installs per-user, with no administrator rights.
+- `filebridge-portable-<version>.exe` runs from any folder with no install. It unpacks itself to
+  a temporary folder each time it starts, so it starts a little slower.
+
+Either one keeps your jobs in `%APPDATA%\FileBridge`. Only one copy runs at a time.
 
 ## Moving from Bedrock Panel
 

@@ -89,6 +89,7 @@ jobs:
           $files = @(Get-ChildItem dist -Filter *.exe | Where-Object { $_.Name -notlike '*__uninstaller*' })
           $files += Get-Item 'dist\win-unpacked\FileBridge.exe'
           $files += Get-Item 'dist\win-unpacked\resources\app.asar.unpacked\shell\native\filebridge_dpapi.node'
+          if (-not ($files | Where-Object { $_.Name -like 'filebridge-portable-*.exe' })) { throw 'the portable exe was not built' }
           foreach ($f in $files) {
             $s = Get-AuthenticodeSignature $f.FullName
             if ($s.Status -ne 'Valid') { throw "$($f.Name) is not validly signed: $($s.Status) $($s.StatusMessage)" }

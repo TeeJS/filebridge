@@ -46,7 +46,8 @@
     ],
     "win": {
       "target": [
-        "nsis"
+        "nsis",
+        "portable"
       ],
       "icon": "assets/icon.png",
       "signExts": [
@@ -62,6 +63,9 @@
       "perMachine": false,
       "guid": "36a34d7f-ced7-44f9-ba8e-c5256911e1db",
       "artifactName": "filebridge-setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "filebridge-portable-${version}.${ext}"
     }
   }
 }
